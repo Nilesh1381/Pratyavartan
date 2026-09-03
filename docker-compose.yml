@@ -1,0 +1,30 @@
+services:
+  revive:
+    build: .
+    container_name: revive-war-room
+    ports:
+      - "8010:8010"
+    environment:
+      - PORT=8010
+    env_file:
+      - path: .env
+        required: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8010/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  site:
+    build:
+      context: ./revive-site
+      args:
+        NEXT_PUBLIC_CONSOLE_URL: http://localhost:8010
+        NEXT_PUBLIC_API_DOCS_URL: http://localhost:8010/docs
+    ports: ["3000:3000"]
+    depends_on:
+      revive:
+        condition: service_healthy
+    restart: unless-stopped

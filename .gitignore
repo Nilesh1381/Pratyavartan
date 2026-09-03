@@ -1,0 +1,53 @@
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# SQLite Database & WAL files
+*.db
+*.db-wal
+*.db-shm
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs & Dev output
+*.log
+dev_out.txt
+dev_err.txt
+uvicorn_*.txt
+
+# Audio cache & TTS output
+audio/*.mp3
+static/audio/*.mp3
+
+# Frontend & Node
+node_modules/
+revive-site/.next/
+revive-site/tsconfig.tsbuildinfo
+revive-site/dev-server.log
+
+# Test artifacts
+test_*.db*
+
+# Auto-generated agent files (Next.js writes these)
+AGENTS.md
+CLAUDE.md
+
+# Local planning docs (not part of app)
+implementation_plan.md

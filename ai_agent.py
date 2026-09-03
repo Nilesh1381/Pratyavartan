@@ -1,0 +1,671 @@
+"""
+ai_agent.py - Multi-Provider AI Diagnostic Brain, Dynamic Discount Engine & Voice Negotiator.
+
+COMPLIANCE PURPOSE:
+Executes deterministic, bounded AI evaluation of payment failures using configurable LLM providers
+(Groq, OpenRouter, OpenAI, etc.) with strict JSON mode. Hard-coded stopping rules strictly supersede
+model output to guarantee compliance with RBI customer communication and anti-harassment mandates.
+Integrates an automated Dynamic Discount Engine and personalized Hinglish Voice Negotiation Generator
+with detailed fallback error telemetry.
+"""
+
+import json
+import logging
+import os
+import uuid
+from typing import Any, Dict, List, Literal, Optional, Tuple
+from urllib.parse import quote
+from dotenv import load_dotenv
+from openai import OpenAI
+from pydantic import BaseModel, Field
+import db
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+# Configurable LLM Provider Settings
+LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
+MODEL_NAME: str = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+LLM_API_KEY: str = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", "dummy"))
+MERCHANT_UPI_VPA: str = os.getenv("MERCHANT_UPI_VPA", "MERCHANT_VPA@razorpay")
+MERCHANT_DISPLAY_NAME: str = os.getenv("MERCHANT_NAME", "Merchant")
+
+# Startup log announcing active LLM Provider
+logger.info("[LLM_CONFIG] Active Provider: %s | Model: %s", LLM_BASE_URL, MODEL_NAME)
+
+
+def get_llm_client() -> Optional[OpenAI]:
+    """
+    Dynamically loads and initializes the OpenAI-compatible client (Groq, OpenRouter, OpenAI, etc.)
+    using current environment variables.
+    """
+    api_key = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", "dummy")).strip()
+    base_url = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1").strip()
+    
+    if (
+        api_key
+        and api_key != "dummy"
+        and not api_key.startswith("sk-your-")
+        and not api_key.startswith("sk-dummy")
+    ):
+        try:
+            return OpenAI(api_key=api_key, base_url=base_url)
+        except Exception as init_err:
+            logger.warning("[LLM_INIT_WARN] %s. Fallback heuristics will be active.", init_err)
+    return None
+
+
+class AIDiagnosis(BaseModel):
+    """
+    Structured, strictly validated output of the AI revenue diagnostic model.
+    """
+    diagnosis: Literal["BANK_DOWN", "CART_DROP", "LOW_BALANCE", "UNKNOWN"]
+    action: Literal["WAIT_AND_MONITOR", "SEND_UPI_INTENT", "SWITCH_INSTRUMENT", "ESCALATE_HUMAN"]
+    reasoning: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    scenario: Optional[str] = None
+    blocked_methods: Optional[List[str]] = None
+    enabled_methods: Optional[List[str]] = None
+    upi_intent_uri: Optional[str] = None
+
+
+# System Prompt optimized for Llama 3.3 70B and OpenAI models with strict schema definitions
+SYSTEM_PROMPT = """
+You are Razorpay's AI Revenue Recovery Agent. You diagnose payment failures and prescribe bounded recovery actions.
+
+DIAGNOSIS AND ACTION TAXONOMY:
+1. BANK_DOWN: error contains 'gateway', 'timeout', 'bank_decline', 'network', 'server_error'
+   → action: WAIT_AND_MONITOR (bank issue resolves itself)
+   → scenario: BANK_DOWN
+2. CART_DROP: error contains 'abandoned', 'session_timeout', 'user_cancelled', 'browser_closed', 'checkout_incomplete'
+   → action: SEND_UPI_INTENT (Zero-UI deep link bypasses web checkout)
+   → scenario: CART_ABANDONMENT
+3. LOW_BALANCE: error contains 'insufficient', 'limit_exceeded', 'daily_limit', 'upi_limit', 'balance'
+   → action: SWITCH_INSTRUMENT (disable UPI, offer Card/EMI/PayLater)
+   → scenario: UPI_LIMIT (if daily limit reached) OR INSUFFICIENT_BALANCE (if low account balance)
+4. UNKNOWN: anything else
+   → action: ESCALATE_HUMAN
+   → scenario: UNKNOWN
+
+JSON SCHEMA REQUIREMENT:
+You MUST return a valid JSON object matching this exact schema:
+{
+  "diagnosis": "BANK_DOWN" | "CART_DROP" | "LOW_BALANCE" | "UNKNOWN",
+  "action": "WAIT_AND_MONITOR" | "SEND_UPI_INTENT" | "SWITCH_INSTRUMENT" | "ESCALATE_HUMAN",
+  "scenario": "BANK_DOWN" | "CART_ABANDONMENT" | "UPI_LIMIT" | "INSUFFICIENT_BALANCE" | "UNKNOWN",
+  "reasoning": "<Short explanatory rationale>",
+  "confidence": <float between 0.0 and 1.0>
+}
+
+OUTPUT FORMAT:
+Return ONLY raw valid JSON. Do not include markdown code blocks, backticks, preamble, or conversational commentary.
+"""
+
+VOICE_PROMPT = """
+You are a warm, courteous Indian customer-support executive assisting a customer whose online payment failed.
+Generate a concise, natural Hinglish (Hindi + English) voice message for automated IVR/WhatsApp voice outreach.
+
+REQUIREMENTS:
+1. Speak in polite, reassuring Hinglish.
+2. Max 35 words.
+3. Mention the customer's name, the original amount, the special retention discount applied, and the final discounted amount.
+4. Add a gentle call-to-action asking them to tap the recovery link immediately.
+5. Return ONLY the spoken text string without quotes, formatting, or prefixes.
+"""
+
+
+def map_scenario(error_code: str = "", reasoning: str = "") -> str:
+    """
+    SCENARIO MAPPING — deterministic keyword scan on error_code + reasoning,
+    IN THIS EXACT ORDER (first match wins):
+    1. "limit" → UPI_LIMIT
+    2. "insufficient" OR "balance" → INSUFFICIENT_BALANCE
+    3. "cart" OR "abandon" → CART_ABANDONMENT
+    4. "mandate" OR "autopay" → MANDATE_FAIL
+    5. "bank" OR "gateway" → BANK_DOWN
+    else → UNKNOWN.
+    LLM may refine reasoning text but NEVER the scenario field — scenario
+    comes ONLY from this deterministic map (auditability > cleverness).
+    """
+    combined = f"{error_code} {reasoning}".lower()
+    if "limit" in combined:
+        return "UPI_LIMIT"
+    if "insufficient" in combined or "balance" in combined:
+        return "INSUFFICIENT_BALANCE"
+    if "cart" in combined or "abandon" in combined:
+        return "CART_ABANDONMENT"
+    if "mandate" in combined or "autopay" in combined:
+        return "MANDATE_FAIL"
+    if "bank" in combined or "gateway" in combined:
+        return "BANK_DOWN"
+    return "UNKNOWN"
+
+
+def build_upi_intent_uri(amount_paise: int, payment_id: str = "") -> Optional[str]:
+    """
+    Builds upi_intent_uri as:
+    upi://pay?pa={DEMO_VPA}&pn={merchant_name}&am={amount_paise/100}&cu=INR&tn=Revive
+    DEMO_VPA from env (e.g. 'revive@upi'). If DEMO_VPA unset → omit upi_intent_uri, never crash.
+    Amount MUST equal the recovery amount.
+    """
+    vpa = os.getenv("DEMO_VPA", os.getenv("MERCHANT_UPI_VPA", "")).strip()
+    if not vpa or vpa.lower() in ("dummy", "none", "unset"):
+        return None
+    merchant = os.getenv("MERCHANT_NAME", "Revive").strip() or "Revive"
+    am_str = f"{amount_paise / 100:.2f}"
+    return f"upi://pay?pa={quote(vpa, safe='@')}&pn={quote(merchant)}&am={am_str}&cu=INR&tn=Revive"
+
+
+def resolve_scenario_and_methods(
+    error_code: str = "",
+    reasoning: str = "",
+    amount_paise: int = 0,
+    payment_id: str = "",
+) -> Tuple[str, List[str], List[str], Optional[str], str, str]:
+    """
+    Deterministically resolves scenario, blocked_methods, enabled_methods,
+    upi_intent_uri, prescribed action, and default reasoning.
+    Returns: (scenario, blocked_methods, enabled_methods, upi_intent_uri, action, final_reasoning)
+    """
+    try:
+        scenario = map_scenario(error_code=error_code, reasoning=reasoning)
+
+        if scenario == "UPI_LIMIT":
+            return (
+                "UPI_LIMIT",
+                ["upi", "wallet"],
+                ["card", "emi", "netbanking"],
+                None,
+                "SWITCH_INSTRUMENT",
+                reasoning or "UPI daily limit reached. Re-routing customer to Card/EMI/Netbanking recovery link.",
+            )
+        elif scenario == "INSUFFICIENT_BALANCE":
+            uri = build_upi_intent_uri(amount_paise, payment_id) if (amount_paise > 0) else None
+            return (
+                "INSUFFICIENT_BALANCE",
+                [],
+                ["upi", "wallet", "card", "emi", "netbanking"],
+                uri,
+                "SWITCH_INSTRUMENT",
+                reasoning or "Low account balance. UPI kept enabled with 1-click intent link + Card/EMI backup.",
+            )
+        elif scenario == "CART_ABANDONMENT":
+            uri = build_upi_intent_uri(amount_paise, payment_id) if (amount_paise > 0) else None
+            return (
+                "CART_ABANDONMENT",
+                [],
+                ["upi", "card", "emi", "netbanking"],
+                uri,
+                "SEND_UPI_INTENT",
+                reasoning or "Cart drop identified. Dispatching zero-UI UPI deep link.",
+            )
+        elif scenario == "BANK_DOWN":
+            return (
+                "BANK_DOWN",
+                [],
+                [],
+                None,
+                "WAIT_AND_MONITOR",
+                "Bank/gateway down — spamming link now = futile + annoying. Will resume when service recovers.",
+            )
+        elif scenario == "MANDATE_FAIL":
+            return (
+                "MANDATE_FAIL",
+                [],
+                ["upi", "card"],
+                None,
+                "MANDATE_RETRY",
+                "Mandate/autopay debit failure detected. Routing to Mandate Retry Sequencer.",
+            )
+        else:
+            return (
+                "UNKNOWN",
+                [],
+                ["upi", "card", "emi", "netbanking", "wallet"],
+                None,
+                "ESCALATE_HUMAN",
+                reasoning or "Unclassified failure — safe default, no method restriction applied",
+            )
+    except Exception as err:
+        logger.warning("[SCENARIO_RESOLUTION_ERR] %s", err)
+        return (
+            "UNKNOWN",
+            [],
+            ["upi", "card", "emi", "netbanking", "wallet"],
+            None,
+            "ESCALATE_HUMAN",
+            "Unclassified failure — safe default, no method restriction applied",
+        )
+
+
+def _heuristic_fallback_classifier(
+    error_code: str,
+    error_description: str,
+    amount_paise: int = 0,
+    payment_id: str = "",
+) -> AIDiagnosis:
+    """
+    Deterministic rule-based fallback classifier in the event of LLM API outage or rate limits.
+    Ensures 100% fail-safe continuity without violating business logic.
+    """
+    sc, blk, enb, uri, act, rsn = resolve_scenario_and_methods(
+        error_code=error_code,
+        reasoning=error_description,
+        amount_paise=amount_paise,
+        payment_id=payment_id,
+    )
+
+    diag_map = {
+        "BANK_DOWN": "BANK_DOWN",
+        "CART_ABANDONMENT": "CART_DROP",
+        "UPI_LIMIT": "LOW_BALANCE",
+        "INSUFFICIENT_BALANCE": "LOW_BALANCE",
+        "MANDATE_FAIL": "UNKNOWN",
+        "UNKNOWN": "UNKNOWN",
+    }
+    diag_name = diag_map.get(sc, "UNKNOWN")
+
+    diag = AIDiagnosis(
+        diagnosis=diag_name,
+        action=act if act in ("WAIT_AND_MONITOR", "SEND_UPI_INTENT", "SWITCH_INSTRUMENT", "ESCALATE_HUMAN") else "ESCALATE_HUMAN",
+        reasoning=rsn,
+        confidence=0.95,
+        scenario=sc,
+        blocked_methods=blk,
+        enabled_methods=enb,
+        upi_intent_uri=uri,
+    )
+    return diag
+
+
+def generate_discount_offer(
+    amount_paise: int,
+    error_type: str,
+    correlation_id: Optional[str] = None,
+    payment_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    PART B: AI Dynamic Discount Engine.
+
+    Evaluates transaction value and applies tiered dynamic incentives to salvage high-intent carts:
+    - >= 25,00,000 paise (>= ₹25,000) -> 5% discount
+    - >= 10,00,000 paise (>= ₹10,000) -> 3% discount
+    - >= 5,00,000 paise (>= ₹5,000)  -> 2% discount
+    - else                            -> 0% discount
+    """
+    cid = correlation_id or str(uuid.uuid4())
+    pid = payment_id or "SYSTEM"
+
+    if amount_paise >= 2500000:
+        discount_pct = 5
+    elif amount_paise >= 1000000:
+        discount_pct = 3
+    elif amount_paise >= 500000:
+        discount_pct = 2
+    else:
+        discount_pct = 0
+
+    discount_amount_paise = int(amount_paise * discount_pct / 100)
+    final_amount_paise = amount_paise - discount_amount_paise
+    discount_approved = discount_pct > 0
+
+    offer = {
+        "original_amount_paise": amount_paise,
+        "discount_percentage": discount_pct,
+        "discount_amount_paise": discount_amount_paise,
+        "final_amount_paise": final_amount_paise,
+        "discount_approved": discount_approved,
+    }
+
+    if discount_approved:
+        db.log_event(
+            correlation_id=cid,
+            payment_id=pid,
+            event_type="DISCOUNT_APPROVED",
+            payload=offer,
+            reasoning=f"AI Dynamic Discount Engine authorized {discount_pct}% instant retention incentive (Saved ₹{discount_amount_paise/100:.2f}).",
+            severity="INFO",
+        )
+
+    return offer
+
+
+def generate_voice_script(
+    customer_name: str = "Valued Customer",
+    original_inr: float = 0.0,
+    discount_inr: float = 0.0,
+    final_inr: float = 0.0,
+    correlation_id: Optional[str] = None,
+    payment_id: Optional[str] = None,
+    diagnosis: str = "CART_DROP",
+    original_error_code: str = "",
+) -> str:
+    """
+    PART C: Generates a personalized Hinglish voice negotiation script using the active LLM.
+    - For LOW_BALANCE (persona-aware, driven by the original error_code):
+        * UPI_LIMIT           -> UPI daily limit reached; 1-click Card/EMI link.
+        * INSUFFICIENT_BALANCE / unknown -> balance was low but top-up-able; UPI stays
+          ENABLED with a 1-click UPI intent link + Card/EMI backup.
+    - For CART_DROP: Highlights retention discount incentive and zero-UI recovery.
+    """
+    cid = correlation_id or str(uuid.uuid4())
+    pid = payment_id or "SYSTEM"
+    current_model = os.getenv("LLM_MODEL", MODEL_NAME)
+
+    # Scenario resolution mirrors razorpay_service.resolve_low_balance_scenario
+    try:
+        error_l = str(original_error_code or "").lower()
+        lb_scenario = "UPI_LIMIT" if "limit" in error_l else "INSUFFICIENT_BALANCE"
+    except Exception:
+        lb_scenario = "INSUFFICIENT_BALANCE"
+
+    if diagnosis == "LOW_BALANCE" and lb_scenario == "UPI_LIMIT":
+        fallback_script = (
+            "Sir, aapki UPI daily limit ho gayi thi, isliye Card aur EMI ka one-click link bheja hai. "
+            "Bina cart dobara banaye payment complete kijiye!"
+        )
+    elif diagnosis == "LOW_BALANCE":
+        fallback_script = (
+            "Bhaiya, balance kam tha toh koi baat nahi — ab UPI se 1-click pay kar sakte hain. "
+            "Card aur EMI bhi available hai!"
+        )
+    else:
+        fallback_script = (
+            f"Namaste {customer_name}! Aapka payment complete nahi ho paya tha. "
+            f"Aapke liye special discount apply karke final amount sirf ₹{final_inr:,.2f} hai. "
+            f"Kripya diye gaye link se turant complete karein!"
+        )
+
+    client = get_llm_client()
+    if client:
+        try:
+            if diagnosis == "LOW_BALANCE" and lb_scenario == "UPI_LIMIT":
+                low_balance_prompt = (
+                    "You are a warm, courteous Indian customer-support executive assisting a customer whose UPI payment failed due to daily bank/UPI limit.\n"
+                    "Generate a concise, natural Hinglish voice message (max 30 words).\n"
+                    "State that their UPI daily limit was reached, and we have sent a 1-click Card/EMI recovery link so they do NOT need to rebuild their cart.\n"
+                    "Do NOT mention any discounts or price reductions.\n"
+                    "Return ONLY the spoken text string without quotes, formatting, or prefixes."
+                )
+                user_msg = (
+                    f"Customer Name: {customer_name}\n"
+                    f"Original Amount: ₹{original_inr:,.2f}\n"
+                    f"Failure Reason: UPI Limit Exceeded\n"
+                    f"Alternative Method: Card / EMI One-Click Link (No cart rebuild required)"
+                )
+                system_p = low_balance_prompt
+            elif diagnosis == "LOW_BALANCE":
+                insufficient_prompt = (
+                    "You are a warm, courteous Indian customer-support executive assisting a customer whose UPI payment failed due to insufficient account balance.\n"
+                    "Generate a concise, natural Hinglish voice message (max 30 words).\n"
+                    "Reassure them it is not a problem: their balance can be topped up (e.g., via a friend/family UPI transfer) and they can pay RIGHT NOW via the 1-click UPI link; Card and EMI are also available as backup.\n"
+                    "Do NOT mention any discounts or price reductions.\n"
+                    "Return ONLY the spoken text string without quotes, formatting, or prefixes."
+                )
+                user_msg = (
+                    f"Customer Name: {customer_name}\n"
+                    f"Original Amount: ₹{original_inr:,.2f}\n"
+                    f"Failure Reason: Insufficient Account Balance (top-up possible)\n"
+                    f"Primary Method: 1-Click UPI Intent Link (UPI stays enabled)\n"
+                    f"Backup Methods: Card / EMI / Netbanking"
+                )
+                system_p = insufficient_prompt
+            else:
+                user_msg = (
+                    f"Customer Name: {customer_name}\n"
+                    f"Original Amount: ₹{original_inr:,.2f}\n"
+                    f"Discount Saved: ₹{discount_inr:,.2f}\n"
+                    f"Final Discounted Amount: ₹{final_inr:,.2f}"
+                )
+                system_p = VOICE_PROMPT.strip()
+
+            response = client.chat.completions.create(
+                model=current_model,
+                temperature=0.3,
+                max_tokens=90,
+                timeout=8.0,
+                messages=[
+                    {"role": "system", "content": system_p},
+                    {"role": "user", "content": user_msg},
+                ],
+            )
+            script_text = (response.choices[0].message.content or "").strip().replace('"', '')
+            if script_text and len(script_text) > 15:
+                db.log_event(
+                    correlation_id=cid,
+                    payment_id=pid,
+                    event_type="VOICE_SCRIPT_GENERATED",
+                    payload={"voice_script": script_text, "model": current_model, "diagnosis": diagnosis, "scenario": lb_scenario if diagnosis == "LOW_BALANCE" else "", "final_inr": final_inr},
+                    reasoning=f"Hinglish voice script generated via {current_model} for {diagnosis}.",
+                    severity="INFO",
+                )
+                return script_text
+        except Exception as err:
+            logger.warning("[VOICE_GEN_WARN] LLM Voice script generation fallback: %s", err)
+
+    db.log_event(
+        correlation_id=cid,
+        payment_id=pid,
+        event_type="VOICE_SCRIPT_GENERATED",
+        payload={"voice_script": fallback_script, "fallback": True, "diagnosis": diagnosis, "scenario": lb_scenario if diagnosis == "LOW_BALANCE" else "", "final_inr": final_inr},
+        reasoning=f"Deterministic Hinglish voice script applied for {diagnosis}.",
+        severity="INFO",
+    )
+    return fallback_script
+
+
+def classify_and_decide(
+    error_code: str,
+    error_description: str,
+    retry_count: int,
+    correlation_id: Optional[str] = None,
+    payment_id: Optional[str] = None,
+    amount_paise: int = 0,
+) -> AIDiagnosis:
+    """
+    Classifies a payment failure and prescribes a bounded recovery action.
+
+    COMPLIANCE PURPOSE:
+    Enforces the Critical Hard-Coded Stopping Rule (retry_count >= 2) before any AI call,
+    ensuring compliance with RBI anti-spam and customer protection guidelines.
+    Extracts comprehensive fallback telemetry on any LLM outage.
+    """
+    cid = correlation_id or str(uuid.uuid4())
+    pid = payment_id or "SYSTEM"
+    current_model = os.getenv("LLM_MODEL", MODEL_NAME)
+
+    # =========================================================================
+    # CRITICAL STOPPING RULE: Execute BEFORE any LLM API call
+    # =========================================================================
+    if retry_count >= 2:
+        stopping_reason = (
+            "Stopping Rule: Max retries (2) reached. Escalating per RBI governance policy."
+        )
+        logger.warning("[STOPPING_RULE] Triggered for payment %s (retry_count=%d)", pid, retry_count)
+        
+        db.log_event(
+            correlation_id=cid,
+            payment_id=pid,
+            event_type="STOPPING_RULE_TRIGGERED",
+            payload={"retry_count": retry_count, "limit": 2, "action": "ESCALATE_HUMAN"},
+            reasoning=stopping_reason,
+            severity="WARNING",
+        )
+        return AIDiagnosis(
+            diagnosis="UNKNOWN",
+            action="ESCALATE_HUMAN",
+            reasoning=stopping_reason,
+            confidence=1.0,
+            scenario="UNKNOWN",
+            blocked_methods=[],
+            enabled_methods=[],
+            upi_intent_uri=None,
+        )
+
+    # =========================================================================
+    # LLM Invocation (Groq / OpenRouter / OpenAI / MiniMax) with Strict JSON Output
+    # =========================================================================
+    user_prompt = f"Error Code: {error_code}\nError Description: {error_description}"
+    
+    client = get_llm_client()
+    if client:
+        try:
+            try:
+                response = client.chat.completions.create(
+                    model=current_model,
+                    response_format={"type": "json_object"},
+                    temperature=0.1,
+                    max_tokens=250,
+                    timeout=8.0,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT.strip()},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                )
+            except Exception as format_err:
+                # If model/provider does not support response_format json_object (e.g. MiniMax direct / certain endpoints)
+                logger.info("[LLM_RETRY] Retrying without response_format for model %s: %s", current_model, format_err)
+                response = client.chat.completions.create(
+                    model=current_model,
+                    temperature=0.1,
+                    max_tokens=250,
+                    timeout=8.0,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT.strip()},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                )
+            raw_content = response.choices[0].message.content or "{}"
+            
+            # Clean possible markdown wrapping if returned by LLM
+            clean_json_str = raw_content.strip()
+            if clean_json_str.startswith("```"):
+                lines = clean_json_str.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                clean_json_str = "\n".join(lines).strip()
+
+            parsed = json.loads(clean_json_str)
+            llm_reasoning = parsed.get("reasoning", f"Diagnosed by {current_model}.")
+
+            sc, blk, enb, uri, act, rsn = resolve_scenario_and_methods(
+                error_code=error_code,
+                reasoning=llm_reasoning or error_description,
+                amount_paise=amount_paise,
+                payment_id=pid if pid != "SYSTEM" else "",
+            )
+
+            diagnosis_obj = AIDiagnosis(
+                diagnosis=parsed.get("diagnosis", "UNKNOWN"),
+                action=act if act in ("WAIT_AND_MONITOR", "SEND_UPI_INTENT", "SWITCH_INSTRUMENT", "ESCALATE_HUMAN") else "ESCALATE_HUMAN",
+                reasoning=rsn,
+                confidence=float(parsed.get("confidence", 0.95)),
+                scenario=sc,
+                blocked_methods=blk,
+                enabled_methods=enb,
+                upi_intent_uri=uri,
+            )
+            return diagnosis_obj
+
+        except Exception as api_err:
+            # Detailed Fallback Error Logging
+            status_code = getattr(api_err, "status_code", None)
+            if status_code is None and hasattr(api_err, "response") and hasattr(api_err.response, "status_code"):
+                status_code = api_err.response.status_code
+            if status_code is None:
+                status_code = "UNKNOWN_STATUS"
+
+            error_text = str(api_err)
+            if hasattr(api_err, "response") and hasattr(api_err.response, "text") and api_err.response.text:
+                error_text = f"{error_text} | Response Body: {api_err.response.text}"
+
+            fallback_error_msg = f"FALLBACK TRIGGERED: LLM failed with [{status_code}] - [{error_text}]. Heuristic applied."
+            logger.error("LLM Provider API call failed: %s", fallback_error_msg)
+            
+            db.log_event(
+                correlation_id=cid,
+                payment_id=pid,
+                event_type="ERROR",
+                payload={"status_code": status_code, "error": str(api_err), "module": f"LLM_{current_model}"},
+                reasoning=fallback_error_msg,
+                severity="WARNING",
+            )
+
+            fallback_diag = _heuristic_fallback_classifier(
+                error_code=error_code,
+                error_description=error_description,
+                amount_paise=amount_paise,
+                payment_id=pid if pid != "SYSTEM" else "",
+            )
+            return fallback_diag
+
+    # Fallback when LLM client is not configured
+    return _heuristic_fallback_classifier(
+        error_code=error_code,
+        error_description=error_description,
+        amount_paise=amount_paise,
+        payment_id=pid if pid != "SYSTEM" else "",
+    )
+
+
+def process_failed_payment(
+    payment_id: str,
+    correlation_id: Optional[str] = None,
+) -> Optional[AIDiagnosis]:
+    """
+    Orchestrates the single-payment AI evaluation workflow.
+
+    COMPLIANCE PURPOSE:
+    Fetches raw state, computes diagnosis under strict boundary rules,
+    logs the AI decision into the immutable audit ledger, and increments the retry count.
+    """
+    cid = correlation_id or str(uuid.uuid4())
+    payment = db.get_payment(payment_id)
+    if not payment:
+        logger.error("Payment ID %s not found in database.", payment_id)
+        return None
+
+    amount_paise = int(payment.get("amount", 0))
+    error_code = payment.get("error_code") or "UNKNOWN_ERROR"
+    error_desc = payment.get("error_description") or ""
+    retry_count = int(payment.get("retry_count", 0))
+
+    diagnosis = classify_and_decide(
+        error_code=error_code,
+        error_description=error_desc,
+        retry_count=retry_count,
+        correlation_id=cid,
+        payment_id=payment_id,
+        amount_paise=amount_paise,
+    )
+
+    # Log AI Diagnosis Event to Immutable Audit Log with enriched structured metadata
+    diag_payload: Dict[str, Any] = {
+        "diagnosis": diagnosis.diagnosis,
+        "action": diagnosis.action,
+        "confidence": diagnosis.confidence,
+        "retry_count_prior": retry_count,
+        "scenario": diagnosis.scenario or "UNKNOWN",
+        "blocked_methods": diagnosis.blocked_methods or [],
+        "enabled_methods": diagnosis.enabled_methods or [],
+        "reasoning": diagnosis.reasoning,
+    }
+    if diagnosis.upi_intent_uri:
+        diag_payload["upi_intent_uri"] = diagnosis.upi_intent_uri
+
+    db.log_event(
+        correlation_id=cid,
+        payment_id=payment_id,
+        event_type="AI_DIAGNOSIS",
+        payload=diag_payload,
+        reasoning=diagnosis.reasoning,
+        severity="INFO",
+    )
+
+    # Increment retry count in DB
+    db.increment_retry_count(payment_id)
+
+    return diagnosis

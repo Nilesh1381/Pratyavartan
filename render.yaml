@@ -1,0 +1,71 @@
+# ═══════════════════════════════════════════════════════════════════
+# Render Blueprint — AI Revenue Command Center (प्रत्यावर्तन)
+# ═══════════════════════════════════════════════════════════════════
+#
+# DEPLOY ORDER:
+# 1. Backend deploys first (Docker, uses Render-injected PORT).
+# 2. Copy the backend URL (e.g. https://revive-backend.onrender.com).
+# 3. Fill the landing service's NEXT_PUBLIC_* vars with that URL.
+#    This triggers a landing rebuild that bakes the URLs at build time.
+# 4. Copy the landing URL → set ALLOWED_ORIGINS on the backend.
+#
+# SECRET HANDLING:
+# All keys marked  sync: false  are prompted in the Render dashboard.
+# NEVER commit real secret values into this file.
+# ═══════════════════════════════════════════════════════════════════
+
+services:
+  # ── Backend: FastAPI + SQLite (Docker) ──────────────────────────
+  - type: web
+    name: revive-backend
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # --- Secrets (filled in Render dashboard) ---
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      # --- Non-secret defaults ---
+      - key: DEMO_VPA
+        value: revive@upi
+      - key: LLM_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: LLM_MODEL
+        value: minimax/minimax-01
+      - key: DATABASE_PATH
+        value: revenue_recovery.db
+      - key: MERCHANT_NAME
+        value: Merchant
+      - key: PROMISE_GRACE_MINUTES
+        value: "30"
+      # --- Fill AFTER landing URL exists ---
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+  # ── Landing: Next.js (Node runtime) ────────────────────────────
+  # Uses Node runtime (NOT Docker) because NEXT_PUBLIC_* env vars
+  # must be present at BUILD time. Render's Node runtime injects
+  # env vars during the build step; Docker runtime does not support
+  # build-time env injection from the dashboard.
+  # The existing revive-site/Dockerfile remains for local Docker use.
+  - type: web
+    name: revive-landing
+    runtime: node
+    plan: free
+    rootDir: revive-site
+    buildCommand: npm ci && npm run build && cp -r public .next/standalone/public && cp -r .next/static .next/standalone/.next/static
+    startCommand: node .next/standalone/server.js
+    envVars:
+      # --- Fill AFTER backend URL is known ---
+      - key: NEXT_PUBLIC_CONSOLE_URL
+        sync: false
+      - key: NEXT_PUBLIC_API_DOCS_URL
+        sync: false
+      - key: NEXT_PUBLIC_API_BASE_URL
+        sync: false

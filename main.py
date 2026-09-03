@@ -1,0 +1,1131 @@
+"""
+main.py - AI Revenue Command Center Application Gateway.
+
+COMPLIANCE PURPOSE:
+Provides the REST API surface, cryptographically verified Razorpay Webhook receiver
+with HMAC-SHA256 signature verification, simulation playground for hackathon jury demonstration
+(including stopping rule retry cap and webhook simulations), audio streaming endpoint,
+and the merchant assurance UI.
+"""
+
+from dotenv import load_dotenv
+load_dotenv()
+
+import hashlib
+import hmac
+import json
+import logging
+import os
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
+
+import httpx
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
+
+import db
+import orchestrator
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("RevenueCommandCenter")
+
+# Promise-to-Pay grace period (minutes after promised_at before marking broken)
+PROMISE_GRACE_MINUTES = int(os.getenv("PROMISE_GRACE_MINUTES", "30"))
+
+
+def get_webhook_secret() -> bytes:
+    """Returns the Razorpay webhook signing secret as bytes."""
+    return os.getenv("RAZORPAY_WEBHOOK_SECRET", "dummy_webhook_secret_key").encode("utf-8")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifespan context manager for setup and teardown.
+
+    COMPLIANCE PURPOSE:
+    Ensures database schemas, PRAGMA flags, directories, and audit indexes are verified
+    before handling any ingress requests.
+    """
+    logger.info("Initializing AI Revenue Command Center database...")
+    db.init_db()
+    os.makedirs("audio", exist_ok=True)
+    print("[OK] DB initialized with Cryptographic Hash Chaining")
+    yield
+    logger.info("Shutting down AI Revenue Command Center cleanly.")
+
+
+app = FastAPI(
+    title="AI Revenue Command Center",
+    description="Compliance-First Autonomous Revenue Recovery Engine with Dynamic Discounts & Voice Negotiation",
+    version="1.2.0",
+    lifespan=lifespan,
+)
+
+# Enable CORS for interactive testing (restrict via ALLOWED_ORIGINS env var, comma-separated)
+_allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins or ["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+templates = Jinja2Templates(directory="templates")
+
+
+# =========================================================================
+# Pydantic Request Models
+# =========================================================================
+class SimulateFailureRequest(BaseModel):
+    """Request model for testing live failure recovery scenarios."""
+    error_code: str = Field(..., description="Failure error code, e.g. upi_limit_exceeded, checkout_incomplete, gateway_timeout")
+    error_description: str = Field(..., description="Descriptive error detail")
+    amount: int = Field(default=50000, description="Amount in paise (e.g., 50000 = ₹500, 500000 = ₹5,000)")
+    user_contact: Optional[str] = Field(default="9876543210", description="Customer phone number (will be pseudonymized)")
+
+
+# =========================================================================
+# API Endpoints
+# =========================================================================
+
+@app.get("/health")
+def get_health() -> Dict[str, str]:
+    """
+    Health check endpoint returning deployment status and current timestamp.
+    """
+    return {
+        "status": "healthy",
+        "phase": "complete",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "service": "AI Revenue Command Center",
+    }
+
+
+@app.get("/audio/{filename}")
+def serve_audio_file(filename: str):
+    """
+    Serves synthesized Hinglish voice negotiation audio files to the browser.
+    Includes caching headers and byte-range support for instant, stutter-free playback.
+    """
+    safe_filename = os.path.basename(filename)
+    audio_path = os.path.join("audio", safe_filename)
+    if os.path.exists(audio_path):
+        return FileResponse(
+            audio_path,
+            media_type="audio/mpeg",
+            headers={
+                "Cache-Control": "public, max-age=86400",
+                "Accept-Ranges": "bytes",
+            },
+        )
+    raise HTTPException(status_code=404, detail="Audio file not found")
+
+
+@app.get("/test-audit-log")
+def test_audit_log() -> Dict[str, Any]:
+    """
+    Diagnostic endpoint to verify end-to-end database connectivity and audit trail logging.
+    """
+    test_payment_id = f"pay_test_{uuid.uuid4().hex[:8]}"
+    correlation_id = str(uuid.uuid4())
+
+    db.insert_or_ignore_payment(
+        payment_id=test_payment_id,
+        amount=150000,
+        currency="INR",
+        error_code="TEST_FAILURE",
+        error_description="Automated system diagnostic test entry",
+        user_contact="9876543210",
+        status="PENDING",
+    )
+
+    db.log_event(
+        correlation_id=correlation_id,
+        payment_id=test_payment_id,
+        event_type="DETECTED",
+        payload={"diagnostic": True, "amount": 150000},
+        reasoning="Diagnostic audit entry verified.",
+        severity="INFO",
+    )
+
+    return {
+        "status": "success",
+        "payment_id": test_payment_id,
+        "correlation_id": correlation_id,
+        "message": "Audit event recorded successfully",
+    }
+
+
+# =========================================================================
+# Production-Grade Razorpay Webhook Receiver
+# =========================================================================
+@app.post("/razorpay-webhook")
+async def handle_razorpay_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_razorpay_signature: Optional[str] = Header(None, alias="X-Razorpay-Signature"),
+) -> JSONResponse:
+    """
+    Production-grade, cryptographically verified Server-to-Server (S2S) Razorpay webhook receiver.
+
+    COMPLIANCE & SECURITY PURPOSE:
+    1. Reads raw bytes and verifies HMAC-SHA256 against RAZORPAY_WEBHOOK_SECRET.
+    2. On signature mismatch: Logs a CRITICAL SECURITY_ALERT event and returns HTTP 400.
+    3. On 'payment.failed': Ingests payment, logs DETECTED, and queues the autonomous AI
+       recovery workflow as a background task so the webhook is acknowledged immediately.
+    4. On 'payment.captured' or 'payment_link.paid': Updates status to RECOVERED and logs audit trail.
+    5. Always responds quickly with status 200 for valid webhooks.
+    """
+    raw_body = await request.body()
+    correlation_id = str(uuid.uuid4())
+    secret = get_webhook_secret()
+
+    # 1. Compute HMAC-SHA256 signature
+    computed_sig = hmac.new(key=secret, msg=raw_body, digestmod=hashlib.sha256).hexdigest()
+
+    # 2. Verify signature securely using constant-time comparison
+    if not x_razorpay_signature or not hmac.compare_digest(computed_sig, x_razorpay_signature):
+        logger.error("[SECURITY_ALERT] Webhook signature mismatch: missing or invalid X-Razorpay-Signature.")
+        db.log_event(
+            correlation_id=correlation_id,
+            payment_id="SYSTEM_WEBHOOK",
+            event_type="SECURITY_ALERT",
+            payload={
+                "error": "Invalid or missing HMAC-SHA256 signature",
+            },
+            reasoning="HMAC-SHA256 Signature verification failed for Razorpay webhook. Potential spoofing or tampering attempt.",
+            severity="CRITICAL",
+        )
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"status": "error", "message": "Invalid webhook signature"},
+        )
+
+    # 3. Parse JSON payload
+    try:
+        payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except Exception as parse_err:
+        logger.error("Failed to parse webhook JSON payload: %s", parse_err)
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"status": "error", "message": "Invalid JSON body"},
+        )
+
+    event = payload.get("event", "")
+    logger.info("Cryptographically verified Razorpay Webhook received: event='%s'", event)
+
+    # 4. Handle 'payment.failed' event
+    if event == "payment.failed":
+        payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+        payment_id = payment_entity.get("id") or f"pay_wh_{uuid.uuid4().hex[:8]}"
+        amount = payment_entity.get("amount", 250000)
+        currency = payment_entity.get("currency", "INR")
+        error_code = payment_entity.get("error_code") or payment_entity.get("error_reason") or "payment_failed"
+        error_description = payment_entity.get("error_description") or "Payment failed via Razorpay Gateway"
+        raw_contact = payment_entity.get("contact", "9876543210")
+        masked_contact = db.mask_contact(raw_contact)
+
+        # Ingest failed payment idempotently
+        db.insert_or_ignore_payment(
+            payment_id=payment_id,
+            amount=amount,
+            currency=currency,
+            error_code=error_code,
+            error_description=error_description,
+            user_contact=masked_contact,
+            status="PENDING",
+        )
+
+        # Log DETECTED audit event
+        db.log_event(
+            correlation_id=correlation_id,
+            payment_id=payment_id,
+            event_type="DETECTED",
+            payload={
+                "amount_paise": amount,
+                "currency": currency,
+                "error_code": error_code,
+                "error_description": error_description,
+                "masked_contact": masked_contact,
+                "source": "razorpay_webhook",
+                "event": event,
+            },
+            reasoning="Payment failure captured via cryptographically verified Razorpay webhook. Routed through autonomous AI recovery pipeline.",
+            severity="INFO",
+        )
+
+        # Queue recovery pipeline (AI Diagnosis -> Dynamic Action -> Razorpay Execution)
+        # as a background task so the webhook is acknowledged instantly and the
+        # event loop / Razorpay retry timers are never blocked by LLM or TTS latency.
+        background_tasks.add_task(
+            orchestrator.process_single_payment_workflow,
+            payment_id=payment_id,
+            correlation_id=correlation_id,
+        )
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "status": "accepted",
+                "event": event,
+                "payment_id": payment_id,
+                "correlation_id": correlation_id,
+                "workflow_result": {"queued": True},
+            },
+        )
+
+    # 5. Handle 'payment.captured', 'order.paid', or 'payment_link.paid'
+    elif event in ("payment_link.paid", "payment.captured", "order.paid"):
+        if event == "payment_link.paid":
+            plink_entity = payload.get("payload", {}).get("payment_link", {}).get("entity", {})
+            notes = plink_entity.get("notes", {})
+            payment_id = notes.get("payment_id") or plink_entity.get("id") or "SYSTEM"
+        else:
+            payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+            payment_id = payment_entity.get("id") or payload.get("payment_id") or "SYSTEM"
+
+        # Update payment status to RECOVERED in database
+        db.update_payment_status(payment_id, "RECOVERED")
+
+        # Log RECOVERED audit event
+        db.log_event(
+            correlation_id=correlation_id,
+            payment_id=payment_id,
+            event_type="RECOVERED",
+            payload=payload,
+            reasoning=f"Payment {payment_id} successfully marked as RECOVERED via verified Razorpay webhook event '{event}'.",
+            severity="INFO",
+        )
+
+        # PROMISE-KEPT HOOK: close any active promises for this payment
+        try:
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE promises SET status='kept' WHERE payment_id=? AND status IN ('pending','followed_up')",
+                    (payment_id,),
+                )
+                if cursor.rowcount > 0:
+                    conn.commit()
+                    db.log_event(
+                        correlation_id=correlation_id,
+                        payment_id=payment_id,
+                        event_type="PROMISE_KEPT",
+                        payload={"promise_count_resolved": cursor.rowcount, "source": "webhook_recovered"},
+                        reasoning=f"Promise(s) resolved as KEPT — payment {payment_id} recovered via webhook.",
+                        severity="INFO",
+                    )
+                else:
+                    conn.commit()
+        except Exception as pk_err:
+            logger.warning("Promise-kept hook (webhook) error for %s: %s", payment_id, pk_err)
+
+        # MANDATE-CANCEL HOOK: cancel remaining scheduled debit attempts
+        try:
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE mandate_schedule SET status='cancelled' WHERE payment_id=? AND status='pending'",
+                    (payment_id,),
+                )
+                if cursor.rowcount > 0:
+                    conn.commit()
+                    db.log_event(
+                        correlation_id=correlation_id,
+                        payment_id=payment_id,
+                        event_type="MANDATE_CANCELLED",
+                        payload={"cancelled_attempts": cursor.rowcount, "source": "webhook_recovered"},
+                        reasoning="recovered — no further debit attempts",
+                        severity="INFO",
+                    )
+                else:
+                    conn.commit()
+        except Exception as mc_err:
+            logger.warning("Mandate cancel hook (webhook) error for %s: %s", payment_id, mc_err)
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "status": "ok",
+                "event": event,
+                "payment_id": payment_id,
+                "payment_status": "RECOVERED",
+            },
+        )
+
+    # 6. Handle other webhook events gracefully
+    else:
+        db.log_event(
+            correlation_id=correlation_id,
+            payment_id="SYSTEM_WEBHOOK",
+            event_type="S2S_CALLBACK",
+            payload=payload,
+            reasoning=f"Razorpay webhook event '{event}' received and logged.",
+            severity="INFO",
+        )
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"status": "ok", "event": event},
+        )
+
+
+# =========================================================================
+# Webhook Simulation Endpoint (Demo without ngrok)
+# =========================================================================
+@app.post("/simulate-webhook")
+async def simulate_webhook() -> Dict[str, Any]:
+    """
+    Simulates a realistic Razorpay payment.failed Webhook without requiring ngrok.
+    Computes a valid HMAC-SHA256 signature and internally dispatches to /razorpay-webhook,
+    proving the exact production signature verification and recovery pipeline live.
+    """
+    sim_payment_id = f"pay_wh_sim_{uuid.uuid4().hex[:8]}"
+    sim_order_id = f"order_{uuid.uuid4().hex[:10]}"
+    current_timestamp = int(time.time())
+
+    # Realistic Razorpay payment.failed webhook payload
+    webhook_payload = {
+        "entity": "event",
+        "account_id": "acc_razorpay_live_test",
+        "event": "payment.failed",
+        "contains": ["payment"],
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": sim_payment_id,
+                    "entity": "payment",
+                    "amount": 350000,  # ₹3,500.00
+                    "currency": "INR",
+                    "status": "failed",
+                    "order_id": sim_order_id,
+                    "invoice_id": None,
+                    "international": False,
+                    "method": "upi",
+                    "amount_refunded": 0,
+                    "refund_status": None,
+                    "captured": False,
+                    "description": "Live Razorpay Webhook Ingestion Demo",
+                    "card_id": None,
+                    "bank": None,
+                    "wallet": None,
+                    "vpa": "customer@oksbi",
+                    "email": "customer@example.com",
+                    "contact": "+919876543210",
+                    "notes": {
+                        "source": "webhook_simulation",
+                        "merchant": "AI Revenue Command Center",
+                    },
+                    "fee": None,
+                    "tax": None,
+                    "error_code": "BAD_REQUEST_ERROR",
+                    "error_description": "Payment was declined by customer bank due to technical timeout",
+                    "error_source": "customer",
+                    "error_step": "payment_authentication",
+                    "error_reason": "payment_failed",
+                    "created_at": current_timestamp,
+                }
+            }
+        },
+        "created_at": current_timestamp,
+    }
+
+    raw_bytes = json.dumps(webhook_payload, separators=(",", ":")).encode("utf-8")
+    secret = get_webhook_secret()
+    signature = hmac.new(key=secret, msg=raw_bytes, digestmod=hashlib.sha256).hexdigest()
+
+    # Internally dispatch to /razorpay-webhook with the signature header
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
+        resp = await client.post(
+            "/razorpay-webhook",
+            content=raw_bytes,
+            headers={
+                "X-Razorpay-Signature": signature,
+                "Content-Type": "application/json",
+            },
+        )
+
+    webhook_result = resp.json() if resp.status_code == 200 else {"error": resp.text}
+
+    return {
+        "signature_verified": resp.status_code == 200,
+        "event": "payment.failed",
+        "payment_id": sim_payment_id,
+        "status_code": resp.status_code,
+        "webhook_result": webhook_result,
+    }
+
+
+# =========================================================================
+# Existing Recovery Sweep & Simulation Endpoints
+# =========================================================================
+@app.get("/trigger-agent")
+def trigger_agent() -> Dict[str, Any]:
+    """
+    Triggers the autonomous recovery agent orchestration sweep.
+    """
+    summary = orchestrator.run_recovery_agent()
+    return summary
+
+
+@app.post("/simulate-failure")
+def simulate_failure(req: SimulateFailureRequest) -> Dict[str, Any]:
+    """
+    Interactive Simulation Endpoint for Live Demonstrations.
+    """
+    sim_payment_id = f"pay_sim_{uuid.uuid4().hex[:8]}"
+    correlation_id = str(uuid.uuid4())
+
+    # Step 1: Ingest payment into database
+    db.insert_or_ignore_payment(
+        payment_id=sim_payment_id,
+        amount=req.amount,
+        currency="INR",
+        error_code=req.error_code,
+        error_description=req.error_description,
+        user_contact=req.user_contact,
+        status="PENDING",
+    )
+
+    # Step 2: Log DETECTED event in audit ledger
+    db.log_event(
+        correlation_id=correlation_id,
+        payment_id=sim_payment_id,
+        event_type="DETECTED",
+        payload={
+            "amount_paise": req.amount,
+            "error_code": req.error_code,
+            "error_description": req.error_description,
+            "masked_contact": db.mask_contact(req.user_contact),
+            "simulated": True,
+        },
+        reasoning="Simulated failure event captured for jury demonstration.",
+        severity="INFO",
+    )
+
+    # Step 3: Run full workflow on the simulated payment
+    result = orchestrator.process_single_payment_workflow(
+        payment_id=sim_payment_id,
+        correlation_id=correlation_id,
+    )
+
+    return {
+        "success": True,
+        "payment_id": sim_payment_id,
+        "correlation_id": correlation_id,
+        "input": req.model_dump(),
+        "workflow_result": result,
+    }
+
+
+@app.post("/simulate-retry-cap")
+def simulate_retry_cap() -> Dict[str, Any]:
+    """
+    Simulates Stopping Rule Enforcement by attempting recovery on a payment with retry_count >= 2.
+    Guarantees that the LLM is skipped, logging STOPPING_RULE_TRIGGERED and ESCALATED.
+    """
+    sim_payment_id = f"pay_sim_retry_{uuid.uuid4().hex[:8]}"
+    correlation_id = str(uuid.uuid4())
+
+    # Step 1: Ingest payment into database with retry_count artificially set to 2
+    db.insert_or_ignore_payment(
+        payment_id=sim_payment_id,
+        amount=45000,
+        currency="INR",
+        error_code="user_cancelled_repeated",
+        error_description="Customer closed checkout twice consecutively",
+        user_contact="9876543210",
+        status="PENDING",
+    )
+
+    # Artificially set retry_count to 2
+    with db.get_connection() as conn:
+        conn.execute("UPDATE failed_payments SET retry_count = 2, status = 'PENDING' WHERE payment_id = ?", (sim_payment_id,))
+        conn.commit()
+
+    # Step 2: Log DETECTED event in audit ledger
+    db.log_event(
+        correlation_id=correlation_id,
+        payment_id=sim_payment_id,
+        event_type="DETECTED",
+        payload={
+            "amount_paise": 45000,
+            "error_code": "user_cancelled_repeated",
+            "retry_count": 2,
+            "simulated": True,
+        },
+        reasoning="Simulated retry cap failure event captured for stopping rule verification.",
+        severity="INFO",
+    )
+
+    # Step 3: Run full workflow - stopping rule skips LLM and escalates
+    result = orchestrator.process_single_payment_workflow(
+        payment_id=sim_payment_id,
+        correlation_id=correlation_id,
+    )
+
+    return {
+        "status": "success",
+        "message": "Retry cap triggered, payment escalated.",
+        "payment_id": sim_payment_id,
+        "correlation_id": correlation_id,
+        "workflow_result": result,
+    }
+
+
+@app.post("/customer-paid")
+async def customer_paid(request: Request) -> JSONResponse:
+    """
+    Human-in-the-Loop Recovery Closure ("Customer Paid" flow).
+
+    A human plays the customer who completes payment via the dispatched recovery link.
+    This endpoint NEVER writes recovery status to the database directly - it acts as
+    the customer by sending a correctly signed Razorpay 'payment_link.paid' webhook
+    through the production /razorpay-webhook HMAC-SHA256 verification path, which is
+    the ONLY component authorized to mark a payment RECOVERED.
+
+    Accepts optional JSON body: {"payment_id": "<id>"}; when absent, the most recent
+    payment with a DETECTED event and no RECOVERED event is selected automatically.
+    """
+    correlation_id = str(uuid.uuid4())
+
+    # 1. Resolve target payment (explicit payment_id wins, else latest pending)
+    chosen_payment_id: Optional[str] = None
+    amount_paise = 25000
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            candidate = body.get("payment_id")
+            if candidate:
+                payment = db.get_payment(str(candidate))
+                if payment:
+                    chosen_payment_id = str(candidate)
+                    amount_paise = int(payment.get("amount") or amount_paise)
+    except Exception:
+        body = None  # Empty or invalid body -> fall back to latest pending payment
+
+    if not chosen_payment_id:
+        target = db.get_latest_pending_payment()
+        if not target:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"status": "error", "message": "No pending payment found to pay."},
+            )
+        chosen_payment_id = target["payment_id"]
+        amount_paise = int(target.get("amount_paise") or amount_paise)
+
+    current_timestamp = int(time.time())
+
+    # 2. Build a realistic Razorpay payment_link.paid event.
+    #    Field contract verified against the webhook handler: it resolves the internal
+    #    payment_id via payload.payment_link.entity.notes.payment_id. Amount stays
+    #    integer paise everywhere.
+    webhook_payload = {
+        "entity": "event",
+        "account_id": "acc_razorpay_live_test",
+        "event": "payment_link.paid",
+        "contains": ["payment_link", "payment"],
+        "payload": {
+            "payment_link": {
+                "entity": {
+                    "id": f"plink_cp_{uuid.uuid4().hex[:14]}",
+                    "entity": "payment_link",
+                    "status": "paid",
+                    "amount": amount_paise,
+                    "currency": "INR",
+                    "description": "Customer completed payment via One-Click Recovery Link",
+                    "notes": {
+                        "original_payment_id": chosen_payment_id,
+                        "payment_id": chosen_payment_id,
+                        "recovery_type": "one_click",
+                        "source": "customer_paid_human_in_loop",
+                    },
+                    "created_at": current_timestamp,
+                    "updated_at": current_timestamp,
+                }
+            },
+            "payment": {
+                "entity": {
+                    "id": f"pay_cp_{uuid.uuid4().hex[:14]}",
+                    "entity": "payment",
+                    "status": "captured",
+                    "amount": amount_paise,
+                    "currency": "INR",
+                    "method": "card",
+                    "captured": True,
+                    "created_at": current_timestamp,
+                }
+            },
+        },
+        "created_at": current_timestamp,
+    }
+
+    # 3. Sign with HMAC-SHA256 using the production webhook secret
+    raw_bytes = json.dumps(webhook_payload, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(key=get_webhook_secret(), msg=raw_bytes, digestmod=hashlib.sha256).hexdigest()
+
+    # 4. Traceability-only audit event (NOT a status update)
+    db.log_event(
+        correlation_id=correlation_id,
+        payment_id=chosen_payment_id,
+        event_type="CUSTOMER_PAID_TRIGGER",
+        payload={
+            "event": "payment_link.paid",
+            "amount_paise": amount_paise,
+            "simulated_customer": True,
+        },
+        reasoning="Human-in-the-loop: customer marked the recovery link as paid. Dispatching signed webhook through production verification path.",
+        severity="INFO",
+    )
+
+    # 5. Internally POST to /razorpay-webhook (same transport pattern as /simulate-webhook)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
+        resp = await client.post(
+            "/razorpay-webhook",
+            content=raw_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "X-Razorpay-Signature": signature,
+            },
+        )
+
+    webhook_result = resp.json() if resp.status_code == 200 else {"error": resp.text}
+
+    if resp.status_code != 200:
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content={
+                "status": "error",
+                "message": "Webhook verification path rejected the signed event.",
+                "detail": webhook_result,
+            },
+        )
+
+    # PROMISE-KEPT HOOK: close any active promises for this payment after recovery
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE promises SET status='kept' WHERE payment_id=? AND status IN ('pending','followed_up')",
+                (chosen_payment_id,),
+            )
+            if cursor.rowcount > 0:
+                conn.commit()
+                db.log_event(
+                    correlation_id=correlation_id,
+                    payment_id=chosen_payment_id,
+                    event_type="PROMISE_KEPT",
+                    payload={"promise_count_resolved": cursor.rowcount, "source": "customer_paid"},
+                    reasoning=f"Promise(s) resolved as KEPT — payment {chosen_payment_id} recovered via customer-paid.",
+                    severity="INFO",
+                )
+            else:
+                conn.commit()
+    except Exception as pk_err:
+        logger.warning("Promise-kept hook (customer-paid) error for %s: %s", chosen_payment_id, pk_err)
+
+    # MANDATE-CANCEL HOOK: cancel remaining scheduled debit attempts
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE mandate_schedule SET status='cancelled' WHERE payment_id=? AND status='pending'",
+                (chosen_payment_id,),
+            )
+            if cursor.rowcount > 0:
+                conn.commit()
+                db.log_event(
+                    correlation_id=correlation_id,
+                    payment_id=chosen_payment_id,
+                    event_type="MANDATE_CANCELLED",
+                    payload={"cancelled_attempts": cursor.rowcount, "source": "customer_paid"},
+                    reasoning="recovered — no further debit attempts",
+                    severity="INFO",
+                )
+            else:
+                conn.commit()
+    except Exception as mc_err:
+        logger.warning("Mandate cancel hook (customer-paid) error for %s: %s", chosen_payment_id, mc_err)
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "status": "ok",
+            "payment_id": chosen_payment_id,
+            "event": "payment_link.paid",
+            "closed_via": "production_webhook_path",
+            "webhook_result": webhook_result,
+        },
+    )
+
+
+@app.get("/api/link-quota")
+def get_link_quota() -> JSONResponse:
+    """
+    Returns link quota usage and preservation status since last demo reset.
+    """
+    quota = db.get_link_quota_metrics()
+    return JSONResponse(content=quota)
+
+
+@app.get("/api/decision-trace/{correlation_id}")
+def get_decision_trace(correlation_id: str) -> JSONResponse:
+    """
+    Returns chronological decision trace nodes for a given correlation ID.
+    """
+    trace_nodes = db.get_decision_trace_by_correlation(correlation_id)
+    return JSONResponse(content={"correlation_id": correlation_id, "nodes": trace_nodes, "count": len(trace_nodes)})
+
+
+@app.get("/api/pending-recoveries")
+def get_pending_recoveries(limit: int = 50) -> JSONResponse:
+    """
+    Returns active pending recoveries awaiting customer payment closure.
+    """
+    pending = db.get_pending_recoveries_list(limit=limit)
+    return JSONResponse(content={"pending_recoveries": pending, "count": len(pending)})
+
+
+@app.post("/simulate-mandate-failure")
+def simulate_mandate_failure() -> Dict[str, Any]:
+    """
+    Simulates a mandate/autopay debit failure for Mandate Retry Sequencer testing.
+    """
+    sim_payment_id = f"pay_mnd_{uuid.uuid4().hex[:8]}"
+    correlation_id = str(uuid.uuid4())
+
+    db.insert_or_ignore_payment(
+        payment_id=sim_payment_id,
+        amount=299900,
+        currency="INR",
+        error_code="mandate_autopay_decline",
+        error_description="Customer bank recurring mandate debit declined",
+        user_contact="9876543210",
+        status="PENDING",
+    )
+
+    db.log_event(
+        correlation_id=correlation_id,
+        payment_id=sim_payment_id,
+        event_type="DETECTED",
+        payload={
+            "amount_paise": 299900,
+            "error_code": "mandate_autopay_decline",
+            "error_description": "Recurring mandate debit declined by bank",
+            "masked_contact": "******3210",
+            "simulated": True,
+        },
+        reasoning="Mandate failure captured for retry sequencer demonstration.",
+        severity="INFO",
+    )
+
+    result = orchestrator.process_single_payment_workflow(
+        payment_id=sim_payment_id,
+        correlation_id=correlation_id,
+    )
+
+    return {
+        "status": "success",
+        "message": "Mandate failure ingested and scheduled.",
+        "payment_id": sim_payment_id,
+        "correlation_id": correlation_id,
+        "workflow_result": result,
+    }
+
+
+@app.post("/dev/force-mandate-attempt")
+async def dev_force_mandate_attempt(request: Request) -> JSONResponse:
+    """
+    Demo Accelerator: Forces the next pending mandate attempt to fire immediately.
+    """
+    try:
+        body = await request.json()
+        payment_id = body.get("payment_id") if isinstance(body, dict) else None
+    except Exception:
+        payment_id = None
+
+    result = orchestrator.dev_force_mandate_attempt(payment_id=payment_id)
+    return JSONResponse(status_code=200 if result.get("success") else 400, content=result)
+
+
+@app.get("/api/audit-logs")
+def get_audit_logs(limit: int = 50) -> JSONResponse:
+    """
+    Returns the latest audit log entries formatted for the assurance ledger.
+    """
+    logs = db.get_recent_audit_logs(limit=limit)
+    return JSONResponse(content=logs)
+
+
+@app.get("/api/verify-audit-chain")
+def verify_audit_chain() -> JSONResponse:
+    """
+    Cryptographically verifies the append-only SHA-256 hash chain across all audit log records.
+    """
+    report = db.verify_audit_hash_chain()
+    return JSONResponse(content=report)
+
+
+@app.get("/api/metrics")
+def get_metrics() -> JSONResponse:
+    """
+    Returns real-time financial, recovery, dynamic discount, and voice metrics.
+    """
+    metrics = db.get_dashboard_metrics()
+    return JSONResponse(content=metrics)
+
+
+@app.post("/api/reset-demo")
+def reset_demo() -> JSONResponse:
+    """
+    DEV Endpoint: Truncates audit_logs, link_cache, and test failed payments for a clean demo state.
+    """
+    db.reset_demo_data()
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"status": "success", "message": "Demo data reset successfully."},
+    )
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def render_dashboard(request: Request):
+    """
+    Serves the Merchant Assurance Command Center dashboard interface.
+    """
+    metrics = db.get_dashboard_metrics()
+    recent_logs = db.get_recent_audit_logs(limit=15)
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "metrics": metrics,
+            "recent_logs": recent_logs,
+        },
+    )
+
+
+@app.get("/", response_class=HTMLResponse)
+def root_redirect(request: Request):
+    """Redirects the root index to the /dashboard endpoint."""
+    return render_dashboard(request)
+
+
+# =========================================================================
+# Promise-to-Pay Tracker Endpoints
+# =========================================================================
+class PromiseToPayRequest(BaseModel):
+    """Request model for the Promise-to-Pay endpoint."""
+    payment_id: Optional[str] = None
+    promised_hour: Optional[int] = None
+    minutes_from_now: Optional[int] = None
+
+
+@app.post("/promise-to-pay")
+async def promise_to_pay(request: Request) -> JSONResponse:
+    """
+    Records a customer's promise to pay at a specified time.
+    Supports demo mode (minutes_from_now) and real mode (promised_hour with RBI window clamping).
+    """
+    correlation_id = str(uuid.uuid4())
+    now_utc = datetime.now(timezone.utc)
+    # IST offset
+    ist_offset = timedelta(hours=5, minutes=30)
+    now_ist = now_utc + ist_offset
+
+    # Parse body
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+
+    payment_id = body.get("payment_id")
+    promised_hour = body.get("promised_hour")
+    minutes_from_now = body.get("minutes_from_now")
+
+    # VALIDATION 1: time_required
+    if promised_hour is None and minutes_from_now is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "time_required"},
+        )
+
+    # VALIDATION 2: minutes_from_now range
+    if minutes_from_now is not None:
+        try:
+            minutes_from_now = int(minutes_from_now)
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"error": "invalid_minutes_from_now"})
+        if minutes_from_now < 1 or minutes_from_now > 1440:
+            return JSONResponse(status_code=400, content={"error": "invalid_minutes_from_now"})
+
+    # VALIDATION 3: promised_hour range
+    if promised_hour is not None and minutes_from_now is None:
+        try:
+            promised_hour = int(promised_hour)
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"error": "invalid_promised_hour"})
+        if promised_hour < 0 or promised_hour > 23:
+            return JSONResponse(status_code=400, content={"error": "invalid_promised_hour"})
+
+    # PAYMENT RESOLUTION
+    if not payment_id:
+        # Find latest non-RECOVERED payment
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT payment_id FROM failed_payments WHERE status != 'RECOVERED' AND payment_id NOT IN ('SYSTEM','SYSTEM_WEBHOOK') ORDER BY created_at DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            if not row:
+                return JSONResponse(status_code=409, content={"error": "no_active_payment"})
+            payment_id = row["payment_id"]
+    else:
+        payment = db.get_payment(payment_id)
+        if not payment:
+            return JSONResponse(status_code=409, content={"error": "no_active_payment"})
+
+    # VALIDATION: payment already RECOVERED
+    payment = db.get_payment(payment_id)
+    if payment and payment.get("status") == "RECOVERED":
+        return JSONResponse(status_code=400, content={"error": "already_recovered"})
+
+    # VALIDATION: active promise exists
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM promises WHERE payment_id=? AND status IN ('pending','followed_up') LIMIT 1",
+            (payment_id,),
+        )
+        existing = cursor.fetchone()
+        if existing:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "promise_exists", "promise_id": existing["id"]},
+            )
+
+    # TIME RESOLUTION (precedence: minutes_from_now > promised_hour)
+    clamped = False
+    mode = "DEMO"
+    reasoning = ""
+
+    if minutes_from_now is not None:
+        # DEMO MODE
+        promised_at_utc = now_utc + timedelta(minutes=minutes_from_now)
+        mode = "DEMO"
+        reasoning = "DEMO MODE \u2014 RBI window bypassed for live demonstration"
+    else:
+        # REAL MODE with RBI 9-21 IST window clamping
+        target_hour = promised_hour
+        mode = "REAL"
+
+        # Clamp to 9-21 IST window
+        if target_hour < 9:
+            reasoning = f"Requested {target_hour:02d}:00 \u2192 clamped to 09:00 IST per RBI outreach window"
+            target_hour = 9
+            clamped = True
+        elif target_hour >= 22:
+            reasoning = f"Requested {promised_hour:02d}:00 \u2192 clamped to 21:00 IST per RBI outreach window"
+            target_hour = 21
+            clamped = True
+
+        # Build target IST datetime
+        target_ist = now_ist.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+
+        # If target time already passed today, roll to next day
+        if target_ist <= now_ist:
+            target_ist += timedelta(days=1)
+            if not clamped:
+                reasoning = f"Requested {promised_hour:02d}:00 \u2192 rolled to next day {promised_hour:02d}:00 IST (time already past)"
+            else:
+                reasoning += f" \u2192 rolled to next day (time already past)"
+            clamped = True
+
+        if not reasoning:
+            reasoning = f"Promise scheduled at {target_hour:02d}:00 IST within RBI outreach window"
+
+        # Convert IST target to UTC
+        promised_at_utc = target_ist - ist_offset
+
+    promised_at_str = promised_at_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    followup_after_utc = promised_at_utc + timedelta(minutes=PROMISE_GRACE_MINUTES)
+    followup_after_str = followup_after_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    created_at_str = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # INSERT promise
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO promises (payment_id, promised_at, followup_after, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            (payment_id, promised_at_str, followup_after_str, created_at_str),
+        )
+        promise_id = cursor.lastrowid
+        conn.commit()
+
+    # Log PROMISE_TO_PAY via hash chain
+    db.log_event(
+        correlation_id=correlation_id,
+        payment_id=payment_id,
+        event_type="PROMISE_TO_PAY",
+        payload={
+            "promise_id": promise_id,
+            "payment_id": payment_id,
+            "promised_at": promised_at_str,
+            "followup_after": followup_after_str,
+            "clamped": clamped,
+            "mode": mode,
+            "reasoning": reasoning,
+            "correlation_id": correlation_id,
+        },
+        reasoning=reasoning,
+        severity="INFO",
+    )
+
+    return JSONResponse(
+        status_code=201,
+        content={
+            "id": promise_id,
+            "payment_id": payment_id,
+            "promised_at": promised_at_str,
+            "followup_after": followup_after_str,
+            "status": "pending",
+            "clamped": clamped,
+            "reasoning": reasoning,
+        },
+    )
+
+
+@app.post("/dev/force-promise-check")
+def dev_force_promise_check() -> JSONResponse:
+    """
+    DEV Endpoint: Runs ONLY the sweep's promise section immediately.
+    Idempotent — same atomic rowcount guards apply.
+    """
+    try:
+        result = orchestrator.run_promise_sweep()
+        return JSONResponse(status_code=200, content={"status": "ok", "result": result})
+    except Exception as exc:
+        logger.error("Force promise check error: %s", exc)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(exc)})
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+
