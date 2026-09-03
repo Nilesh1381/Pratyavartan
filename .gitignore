@@ -51,3 +51,7 @@ CLAUDE.md
 
 # Local planning docs (not part of app)
 implementation_plan.md
+
+# Hugging Face Spaces standalone bundle
+hf-space/
+
