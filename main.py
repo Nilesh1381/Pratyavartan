@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 import db
 import orchestrator
+import ai_agent
 
 # Configure structured logging
 logging.basicConfig(
@@ -115,6 +116,15 @@ def get_health() -> Dict[str, str]:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "service": "AI Revenue Command Center",
     }
+
+
+@app.get("/api/llm-test")
+def api_llm_test() -> Dict[str, Any]:
+    """
+    Connection test endpoint: makes a completion request using the LLM provider with fallback support.
+    Returns {status:"ok", model:<name>, latency_ms} or {status:"fail", error}.
+    """
+    return ai_agent.test_llm_connection()
 
 
 @app.get("/audio/{filename}")
@@ -1127,5 +1137,6 @@ def dev_force_promise_check() -> JSONResponse:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    port = int(os.getenv("PORT", 8010))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
 

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import uuid
+import time
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import quote
 from dotenv import load_dotenv
@@ -31,8 +32,94 @@ LLM_API_KEY: str = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", "dummy")
 MERCHANT_UPI_VPA: str = os.getenv("MERCHANT_UPI_VPA", "MERCHANT_VPA@razorpay")
 MERCHANT_DISPLAY_NAME: str = os.getenv("MERCHANT_NAME", "Merchant")
 
+# Ordered Model Fallback Chain:
+# Requested priority models followed by active free models to ensure resilient execution
+ORDERED_FALLBACK_MODELS: List[str] = [
+    "mistralai/mistral-7b-instruct:free",
+    "microsoft/phi-3-mini-128k-instruct:free",
+    "qwen/qwen-2-7b-instruct:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "minimax/minimax-m3:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "poolside/laguna-s-2.1:free",
+    "google/gemma-4-26b-a4b-it:free",
+]
+
 # Startup log announcing active LLM Provider
 logger.info("[LLM_CONFIG] Active Provider: %s | Model: %s", LLM_BASE_URL, MODEL_NAME)
+
+
+def test_llm_connection() -> Dict[str, Any]:
+    """
+    Makes a tiny completion request ("Reply with the single word: READY") using the active model / fallback chain.
+    Returns {status:"ok", model:<name>, latency_ms} or {status:"fail", error}.
+    """
+    api_key = os.getenv("LLM_API_KEY", "").strip()
+    if not api_key or api_key == "dummy" or api_key.startswith("sk-your-") or api_key.startswith("sk-dummy"):
+        msg = "PASTE YOUR OpenRouter KEY (sk-or-v1-...) INTO .env THEN RE-RUN"
+        print(msg)
+        return {"status": "fail", "error": msg}
+
+    client = get_llm_client()
+    if not client:
+        return {"status": "fail", "error": "Unable to initialize LLM client with current configuration"}
+
+    current_model = os.getenv("LLM_MODEL", MODEL_NAME).strip()
+    models_to_try = [current_model]
+    for m in ORDERED_FALLBACK_MODELS:
+        if m != current_model and m not in models_to_try:
+            models_to_try.append(m)
+
+    last_error = None
+    for idx, model_name in enumerate(models_to_try):
+        t0 = time.perf_counter()
+        try:
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": "Reply with the single word: READY"}],
+                max_tokens=10,
+                timeout=8.0,
+            )
+            if not resp.choices or not resp.choices[0].message:
+                raise ValueError(f"Model {model_name} returned empty choices")
+            content = (resp.choices[0].message.content or "").strip()
+            if not content:
+                raise ValueError(f"Model {model_name} returned empty content")
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            return {
+                "status": "ok",
+                "model": model_name,
+                "latency_ms": latency_ms,
+            }
+        except Exception as exc:
+            last_error = exc
+            next_model = models_to_try[idx + 1] if idx + 1 < len(models_to_try) else None
+            if next_model:
+                try:
+                    db.log_event(
+                        correlation_id=str(uuid.uuid4()),
+                        payment_id="SYSTEM",
+                        event_type="LLM_MODEL_SWITCH",
+                        payload={"from": model_name, "to": next_model, "reason": str(exc)},
+                        reasoning=f"LLM test request failed for {model_name}: {exc}. Switching to {next_model}.",
+                        severity="INFO",
+                    )
+                except Exception:
+                    pass
+                logger.info("[LLM_MODEL_SWITCH] %s -> %s | Reason: %s", model_name, next_model, exc)
+
+    try:
+        db.log_event(
+            correlation_id=str(uuid.uuid4()),
+            payment_id="SYSTEM",
+            event_type="LLM_ALL_FAILED",
+            payload={"error": str(last_error), "models_tried": models_to_try},
+            reasoning="All models in fallback chain failed during LLM test.",
+            severity="WARNING",
+        )
+    except Exception:
+        pass
+    return {"status": "fail", "error": str(last_error)}
 
 
 def get_llm_client() -> Optional[OpenAI]:
@@ -50,7 +137,7 @@ def get_llm_client() -> Optional[OpenAI]:
         and not api_key.startswith("sk-dummy")
     ):
         try:
-            return OpenAI(api_key=api_key, base_url=base_url)
+            return OpenAI(api_key=api_key, base_url=base_url, max_retries=0)
         except Exception as init_err:
             logger.warning("[LLM_INIT_WARN] %s. Fallback heuristics will be active.", init_err)
     return None
@@ -504,103 +591,138 @@ def classify_and_decide(
         )
 
     # =========================================================================
-    # LLM Invocation (Groq / OpenRouter / OpenAI / MiniMax) with Strict JSON Output
+    # LLM Invocation with Model Fallback Chain & Strict JSON Output
     # =========================================================================
     user_prompt = f"Error Code: {error_code}\nError Description: {error_description}"
     
     client = get_llm_client()
     if client:
-        try:
+        models_to_try = [current_model]
+        for m in ORDERED_FALLBACK_MODELS:
+            if m != current_model and m not in models_to_try:
+                models_to_try.append(m)
+
+        last_api_err = None
+        for idx, model_name in enumerate(models_to_try):
             try:
-                response = client.chat.completions.create(
-                    model=current_model,
-                    response_format={"type": "json_object"},
-                    temperature=0.1,
-                    max_tokens=250,
-                    timeout=8.0,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT.strip()},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                try:
+                    response = client.chat.completions.create(
+                        model=model_name,
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                        max_tokens=400,
+                        timeout=8.0,
+                        messages=[
+                            {"role": "system", "content": SYSTEM_PROMPT.strip()},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                    )
+                except Exception as format_err:
+                    # If model does not support response_format json_object
+                    logger.info("[LLM_RETRY] Retrying without response_format for model %s: %s", model_name, format_err)
+                    response = client.chat.completions.create(
+                        model=model_name,
+                        temperature=0.1,
+                        max_tokens=400,
+                        timeout=8.0,
+                        messages=[
+                            {"role": "system", "content": SYSTEM_PROMPT.strip()},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                    )
+                if not response.choices or not response.choices[0].message:
+                    raise ValueError(f"Model {model_name} returned empty choices")
+                raw_content = response.choices[0].message.content or ""
+                if not raw_content.strip():
+                    raise ValueError(f"Model {model_name} returned empty content")
+                
+                # Clean possible markdown wrapping if returned by LLM
+                clean_json_str = raw_content.strip()
+                if clean_json_str.startswith("```"):
+                    lines = clean_json_str.split("\n")
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].startswith("```"):
+                        lines = lines[:-1]
+                    clean_json_str = "\n".join(lines).strip()
+
+                parsed = json.loads(clean_json_str)
+                llm_reasoning = parsed.get("reasoning") or parsed.get("diagnosis") or f"Diagnosed by {model_name}."
+
+                diag_raw = str(parsed.get("diagnosis", "UNKNOWN")).upper()
+                if "BANK" in diag_raw or "GATEWAY" in diag_raw or "TIMEOUT" in diag_raw:
+                    safe_diag = "BANK_DOWN"
+                elif "CART" in diag_raw or "ABANDON" in diag_raw:
+                    safe_diag = "CART_DROP"
+                elif "BALANCE" in diag_raw or "LIMIT" in diag_raw or "INSUFFICIENT" in diag_raw:
+                    safe_diag = "LOW_BALANCE"
+                else:
+                    safe_diag = "UNKNOWN"
+
+                sc, blk, enb, uri, act, rsn = resolve_scenario_and_methods(
+                    error_code=error_code,
+                    reasoning=llm_reasoning or error_description,
+                    amount_paise=amount_paise,
+                    payment_id=pid if pid != "SYSTEM" else "",
                 )
-            except Exception as format_err:
-                # If model/provider does not support response_format json_object (e.g. MiniMax direct / certain endpoints)
-                logger.info("[LLM_RETRY] Retrying without response_format for model %s: %s", current_model, format_err)
-                response = client.chat.completions.create(
-                    model=current_model,
-                    temperature=0.1,
-                    max_tokens=250,
-                    timeout=8.0,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT.strip()},
-                        {"role": "user", "content": user_prompt},
-                    ],
+
+                diagnosis_obj = AIDiagnosis(
+                    diagnosis=safe_diag,
+                    action=act if act in ("WAIT_AND_MONITOR", "SEND_UPI_INTENT", "SWITCH_INSTRUMENT", "ESCALATE_HUMAN") else "ESCALATE_HUMAN",
+                    reasoning=rsn,
+                    confidence=float(parsed.get("confidence", 0.95)),
+                    scenario=sc,
+                    blocked_methods=blk,
+                    enabled_methods=enb,
+                    upi_intent_uri=uri,
                 )
-            raw_content = response.choices[0].message.content or "{}"
-            
-            # Clean possible markdown wrapping if returned by LLM
-            clean_json_str = raw_content.strip()
-            if clean_json_str.startswith("```"):
-                lines = clean_json_str.split("\n")
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].startswith("```"):
-                    lines = lines[:-1]
-                clean_json_str = "\n".join(lines).strip()
+                return diagnosis_obj
 
-            parsed = json.loads(clean_json_str)
-            llm_reasoning = parsed.get("reasoning", f"Diagnosed by {current_model}.")
+            except Exception as api_err:
+                last_api_err = api_err
+                next_model = models_to_try[idx + 1] if idx + 1 < len(models_to_try) else None
+                if next_model:
+                    db.log_event(
+                        correlation_id=cid,
+                        payment_id=pid,
+                        event_type="LLM_MODEL_SWITCH",
+                        payload={"from": model_name, "to": next_model, "reason": str(api_err)},
+                        reasoning=f"LLM call failed for {model_name}: {api_err}. Switching to fallback {next_model}.",
+                        severity="INFO",
+                    )
+                    logger.info("[LLM_MODEL_SWITCH] %s -> %s (Reason: %s)", model_name, next_model, api_err)
+                continue
 
-            sc, blk, enb, uri, act, rsn = resolve_scenario_and_methods(
-                error_code=error_code,
-                reasoning=llm_reasoning or error_description,
-                amount_paise=amount_paise,
-                payment_id=pid if pid != "SYSTEM" else "",
-            )
+        # If ALL models in fallback chain failed
+        status_code = getattr(last_api_err, "status_code", None)
+        if status_code is None and hasattr(last_api_err, "response") and hasattr(last_api_err.response, "status_code"):
+            status_code = last_api_err.response.status_code
+        if status_code is None:
+            status_code = "UNKNOWN_STATUS"
 
-            diagnosis_obj = AIDiagnosis(
-                diagnosis=parsed.get("diagnosis", "UNKNOWN"),
-                action=act if act in ("WAIT_AND_MONITOR", "SEND_UPI_INTENT", "SWITCH_INSTRUMENT", "ESCALATE_HUMAN") else "ESCALATE_HUMAN",
-                reasoning=rsn,
-                confidence=float(parsed.get("confidence", 0.95)),
-                scenario=sc,
-                blocked_methods=blk,
-                enabled_methods=enb,
-                upi_intent_uri=uri,
-            )
-            return diagnosis_obj
+        error_text = str(last_api_err)
+        if hasattr(last_api_err, "response") and hasattr(last_api_err.response, "text") and last_api_err.response.text:
+            error_text = f"{error_text} | Response Body: {last_api_err.response.text}"
 
-        except Exception as api_err:
-            # Detailed Fallback Error Logging
-            status_code = getattr(api_err, "status_code", None)
-            if status_code is None and hasattr(api_err, "response") and hasattr(api_err.response, "status_code"):
-                status_code = api_err.response.status_code
-            if status_code is None:
-                status_code = "UNKNOWN_STATUS"
+        fallback_error_msg = f"FALLBACK TRIGGERED: All LLM models failed. Last error [{status_code}] - [{error_text}]. Heuristic applied."
+        logger.warning("[LLM_ALL_FAILED] %s", fallback_error_msg)
+        
+        db.log_event(
+            correlation_id=cid,
+            payment_id=pid,
+            event_type="LLM_ALL_FAILED",
+            payload={"status_code": str(status_code), "error": str(last_api_err), "models_tried": models_to_try},
+            reasoning=fallback_error_msg,
+            severity="WARNING",
+        )
 
-            error_text = str(api_err)
-            if hasattr(api_err, "response") and hasattr(api_err.response, "text") and api_err.response.text:
-                error_text = f"{error_text} | Response Body: {api_err.response.text}"
-
-            fallback_error_msg = f"FALLBACK TRIGGERED: LLM failed with [{status_code}] - [{error_text}]. Heuristic applied."
-            logger.error("LLM Provider API call failed: %s", fallback_error_msg)
-            
-            db.log_event(
-                correlation_id=cid,
-                payment_id=pid,
-                event_type="ERROR",
-                payload={"status_code": status_code, "error": str(api_err), "module": f"LLM_{current_model}"},
-                reasoning=fallback_error_msg,
-                severity="WARNING",
-            )
-
-            fallback_diag = _heuristic_fallback_classifier(
-                error_code=error_code,
-                error_description=error_description,
-                amount_paise=amount_paise,
-                payment_id=pid if pid != "SYSTEM" else "",
-            )
-            return fallback_diag
+        fallback_diag = _heuristic_fallback_classifier(
+            error_code=error_code,
+            error_description=error_description,
+            amount_paise=amount_paise,
+            payment_id=pid if pid != "SYSTEM" else "",
+        )
+        return fallback_diag
 
     # Fallback when LLM client is not configured
     return _heuristic_fallback_classifier(

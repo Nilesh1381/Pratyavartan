@@ -98,7 +98,8 @@ def init_db(db_path: Optional[str] = None) -> None:
                     'AUTO_SWEEP','DEBUG_QR','PROMISE_TO_PAY','PROMISE_FOLLOWUP','PROMISE_KEPT',
                     'PROMISE_BROKEN','PROMISE_SWEEP','ESCALATE_HUMAN','SECURITY_ALERT',
                     'QUOTA_PRESERVED','MANDATE_RETRY_SCHEDULED','MANDATE_ATTEMPT',
-                    'MANDATE_CANCELLED','MANDATE_SCHEDULE_EXHAUSTED'
+                    'MANDATE_CANCELLED','MANDATE_SCHEDULE_EXHAUSTED',
+                    'LLM_MODEL_SWITCH','LLM_ALL_FAILED'
                 )),
                 action_payload TEXT,
                 ai_reasoning TEXT,
@@ -121,7 +122,7 @@ def init_db(db_path: Optional[str] = None) -> None:
         # Check if audit_logs table needs event_type CHECK migration
         cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='audit_logs'")
         row = cursor.fetchone()
-        if row and ("MANDATE_RETRY_SCHEDULED" not in row[0] or "QUOTA_PRESERVED" not in row[0] or "SECURITY_ALERT" not in row[0]):
+        if row and ("LLM_MODEL_SWITCH" not in row[0] or "LLM_ALL_FAILED" not in row[0] or "MANDATE_RETRY_SCHEDULED" not in row[0] or "QUOTA_PRESERVED" not in row[0] or "SECURITY_ALERT" not in row[0]):
             try:
                 cursor.execute("ALTER TABLE audit_logs RENAME TO audit_logs_old")
                 cursor.execute("""
@@ -137,7 +138,8 @@ def init_db(db_path: Optional[str] = None) -> None:
                             'AUTO_SWEEP','DEBUG_QR','PROMISE_TO_PAY','PROMISE_FOLLOWUP','PROMISE_KEPT',
                             'PROMISE_BROKEN','PROMISE_SWEEP','ESCALATE_HUMAN','SECURITY_ALERT',
                             'QUOTA_PRESERVED','MANDATE_RETRY_SCHEDULED','MANDATE_ATTEMPT',
-                            'MANDATE_CANCELLED','MANDATE_SCHEDULE_EXHAUSTED'
+                            'MANDATE_CANCELLED','MANDATE_SCHEDULE_EXHAUSTED',
+                            'LLM_MODEL_SWITCH','LLM_ALL_FAILED'
                         )),
                         action_payload TEXT,
                         ai_reasoning TEXT,
