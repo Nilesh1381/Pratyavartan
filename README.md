@@ -1,3 +1,4 @@
+<div align="center">
 
 # 🛡️ Pratyavartan (प्रत्यावर्तन)
 ### Autonomous, Compliance-First AI Revenue Recovery Engine for Razorpay
@@ -5,35 +6,40 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Next.js](https://img.shields.io/badge/Next.js%2016-black?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org)
 [![Razorpay](https://img.shields.io/badge/Razorpay-02042B?style=for-the-badge&logo=razorpay&logoColor=3395FF)](https://razorpay.com)
-[![HuggingFace Spaces](https://img.shields.io/badge/🤗%20Spaces-Gradio%20SDK-yellow?style=for-the-badge)](https://huggingface.co/spaces/Nilesh67/Pratyavartan)
+[![Cloudflare](https://img.shields.io/badge/Cloudflare%20Tunnel-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
 [![Vercel](https://img.shields.io/badge/Vercel-Deployed-black?style=for-the-badge&logo=vercel&logoColor=white)](https://pratyavartan.vercel.app)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 
 <p align="center">
-  <b>Recover 30%+ of dropped e-commerce revenue autonomously without breaking RBI compliance or annoying customers.</b>
+  <b>Recover 30%+ of dropped e-commerce revenue autonomously — without breaking RBI compliance or annoying customers.</b>
 </p>
 
-[🌐 Live Landing Page](https://pratyavartan.vercel.app) • [⚡ Live Merchant War Room](https://nilesh67-pratyavartan.hf.space/dashboard) • [📚 API Documentation](https://nilesh67-pratyavartan.hf.space/docs)
+[🌐 Live Landing Page](https://pratyavartan.vercel.app) • [⚡ Live Merchant War Room](#-live-demo) • [📚 API Documentation](#-api-endpoints)
 
 </div>
 
 ---
 
-## ⚡ The Problem: The ₹1.2 Lakh Crore Payment Leakage
+## ⚡ The Problem: India's ₹1.2 Lakh Crore Payment Leakage
 
 In Indian e-commerce, **over 32% of transactions fail at the checkout edge**:
-1. **UPI Limit & Insufficient Funds:** Customers get stuck on failing UPI rails with no easy way to switch without abandoning their carts.
-2. **Bank Gateway Downtime:** Indiscriminate recovery bots blast customers with WhatsApp/SMS notifications while the acquiring bank is down, destroying brand trust.
-3. **Harassment & Regulatory Risk:** Aggressive spam violates **RBI Digital Payment Directives**.
-4. **Manual Merchant Escalations:** Support teams spend hours manually identifying failed payments instead of automating recovery.
+
+| Failure Category | What Happens | Business Impact |
+|---|---|---|
+| **UPI Limit / Insufficient Funds** | Customer's UPI app rejects the payment; they abandon the cart | Lost sale, no recovery attempt |
+| **Bank Gateway Downtime** | Acquiring bank is offline; generic bots spam the customer anyway | Brand trust destroyed, RBI violation risk |
+| **Cart Drop / Session Timeout** | Customer gets distracted mid-checkout | Revenue evaporates within minutes |
+| **Manual Escalation Overhead** | Support teams manually review failed payments | Hours wasted, delayed recovery |
+
+**Merchants lose revenue. Customers get harassed. Nobody wins.**
 
 ---
 
 ## 💡 The Solution: Pratyavartan
 
-**Pratyavartan (Sanskrit for *"Return / Reclamation"* )** is an autonomous revenue recovery engine built natively on top of the **Razorpay API ecosystem**. 
+**Pratyavartan** *(Sanskrit: प्रत्यावर्तन — "Return / Reclamation")* is an **autonomous, self-healing revenue recovery engine** built natively on the **Razorpay API ecosystem**.
 
-It listens to real-time payment failure streams, evaluates root causes with a strict-JSON AI diagnostic brain, dispatches self-healing payment channels (Zero-UI UPI Intent and 1-Click Instrument Switching), and logs every single autonomous decision into an **immutable, cryptographically chained audit ledger**.
+It listens to real-time payment failure streams, diagnoses root causes with a **strict-JSON AI brain**, dispatches self-healing payment channels (Zero-UI UPI Intent & 1-Click Instrument Switching), and records every autonomous decision in an **immutable, cryptographically hash-chained audit ledger** — all while strictly respecting **RBI anti-harassment guidelines**.
 
 ---
 
@@ -41,181 +47,229 @@ It listens to real-time payment failure streams, evaluates root causes with a st
 
 ```mermaid
 flowchart TD
-    A[Razorpay Failure Webhook / Simulator] -->|Masked PII Ingestion| B[(SQLite WAL Database)]
-    B -->|State: PENDING| C[Autonomous Orchestrator]
-    C -->|Check retry_count >= 2| D{Regulatory Stopping Rule?}
-    
-    D -- Yes --> E[ESCALATE_HUMAN & Log STOPPING_RULE_TRIGGERED]
-    D -- No --> F[AI Diagnostic Brain: Strict JSON Mode]
-    
-    F -->|CART_DROP| G[Zero-UI UPI Intent Deep Link upi://pay]
-    F -->|LOW_BALANCE| H[1-Click Instrument Switch Disable UPI, Enable Card/EMI]
-    F -->|BANK_DOWN| I[Silent Bank Watch Suppress Outreach]
-    F -->|UNKNOWN| E
-    
-    G --> J[Razorpay Payment Link API / S2S Messaging]
+    A["Razorpay Failure Webhook / Simulator"] -->|"Masked PII Ingestion"| B[("SQLite WAL Database")]
+    B -->|"State: PENDING"| C["Autonomous Orchestrator"]
+    C -->|"Check retry_count >= 2"| D{"Regulatory Stopping Rule?"}
+
+    D -- Yes --> E["ESCALATE_HUMAN & Log STOPPING_RULE_TRIGGERED"]
+    D -- No --> F["AI Diagnostic Brain: Strict JSON Mode"]
+
+    F -->|"CART_DROP"| G["Zero-UI UPI Intent Deep Link"]
+    F -->|"LOW_BALANCE"| H["1-Click Instrument Switch: Card/EMI"]
+    F -->|"BANK_DOWN"| I["Silent Bank Watch: Suppress Outreach"]
+    F -->|"UNKNOWN"| E
+
+    G --> J["Razorpay Payment Link API"]
     H --> J
-    I --> K[Status: MONITORING]
-    
-    J --> L[Customer Completes Payment]
-    L -->|POST /razorpay-webhook HMAC SHA-256| M[S2S Verification]
-    M -->|Status: RECOVERED| B
-    
-    B --> N[Merchant War Room Dashboard & Live Audit Trail]
+    I --> K["Status: MONITORING"]
+
+    J --> L["Customer Completes Payment"]
+    L -->|"POST /razorpay-webhook HMAC SHA-256"| M["S2S Signature Verification"]
+    M -->|"Status: RECOVERED"| B
+
+    B --> N["Merchant War Room Dashboard & Live Audit Trail"]
 ```
 
 ---
 
-## 🚀 Autonomous Superpowers
+## 🚀 Autonomous Recovery Superpowers
 
 ### 1. 🎯 Dynamic 1-Click Instrument Switching (`SWITCH_INSTRUMENT`)
-When an order fails due to insufficient balance or daily UPI caps:
-- Automatically provisions a customized Razorpay Payment Link.
-- **Disables failing payment rails** (`upi=0`, `wallet=0`).
-- **Enforces backup rails** (`card=1`, `emi=1`, `netbanking=1`).
-- Eliminates cart rebuild friction — customer completes checkout with 1 tap.
+When UPI fails due to insufficient balance or daily limits:
+- Automatically provisions a **Razorpay Payment Link** with customized rails.
+- **Disables failing instruments** (`upi=0`, `wallet=0`).
+- **Enables backup rails** (`card=1`, `emi=1`, `netbanking=1`).
+- Customer completes checkout in **1 tap — zero cart rebuild**.
 
 ### 2. ⚡ Zero-UI UPI Deep Linking (`SEND_UPI_INTENT`)
-For dropped carts and session timeouts:
-- Creates direct `upi://pay` intent payloads.
-- Applies intelligent tiered retention incentives (2% to 5% based on cart value).
-- Launches customer's default UPI app (Google Pay, PhonePe, Paytm) directly.
+For abandoned carts and session timeouts:
+- Generates direct `upi://pay` intent URIs.
+- Applies **dynamic tiered retention incentives** (≥₹5K: 2%, ≥₹10K: 3%, ≥₹25K: 5%).
+- Launches the customer's default UPI app (Google Pay, PhonePe, Paytm) directly.
 
 ### 3. 🤫 Silent Bank Health Watch (`WAIT_AND_MONITOR`)
-When an acquiring bank goes down (`BANK_DOWN`):
-- **Outreach is strictly suppressed** to protect merchant reputation.
-- Shifts transaction to active monitoring queue.
-- Re-evaluates payment state once banking rails recover.
+When the acquiring bank is offline (`BANK_DOWN`):
+- **All customer outreach is suppressed** to protect brand reputation.
+- Transaction enters silent monitoring queue.
+- Re-evaluates automatically when banking rails recover.
 
-### 4. 🛑 Hard Regulatory Stopping Rules (RBI Anti-Harassment Guardrails)
-- If a customer transaction reaches `retry_count >= 2`, autonomous outreach immediately aborts.
-- Emits a `STOPPING_RULE_TRIGGERED` event.
-- Flags the transaction as `ESCALATED` to human support with full diagnostic history.
+### 4. 🛑 RBI Anti-Harassment Hard Stopping Rules
+- If `retry_count >= 2` → AI evaluation **aborts immediately**.
+- Emits `STOPPING_RULE_TRIGGERED` audit event.
+- Flags to `ESCALATED` status with full diagnostic trail for human support.
 
 ### 5. 🎙️ Hinglish AI Voice Recovery Engine
-- Dynamically generates hyper-personalized audio outreach in natural Hinglish via `gTTS`.
-- Explains the payment issue respectfully and shares one-click recovery instructions.
+- Generates hyper-personalized audio outreach in natural **Hinglish** via `gTTS`.
+- Different voice scripts per diagnosis (e.g., *"Aapka UPI limit cross ho gaya hai — yeh 1-click Card link se payment complete karein"*).
 
 ### 6. ⛓️ Cryptographic Hash-Chaining Audit Ledger
-- Every log entry is cryptographically sealed with SHA-256 (`hash = SHA256(prev_hash + event_data)`).
-- Provides non-repudiable proof of compliance for RBI/PCI-DSS audits.
+- Every audit log entry is sealed: `hash = SHA256(prev_hash + event_data)`.
+- Provides **tamper-evident, non-repudiable proof** of compliance for RBI/PCI-DSS audits.
 
 ---
 
 ## 🛠️ Tech Stack
 
-| Layer | Technologies |
+| Layer | Technology |
 |---|---|
-| **Backend Engine** | Python 3.11, FastAPI, Uvicorn, SQLite 3 (WAL Mode) |
-| **AI Diagnostic Core** | OpenAI GPT-4o-mini / MiniMax via OpenRouter (Strict JSON Schema) |
-| **Payment & Voice** | Razorpay Python SDK, HMAC SHA-256 Webhook Verification, gTTS |
-| **Merchant War Room** | Bootstrap 5.3 Dark Glassmorphism, Google Fonts (*Outfit*, *Inter*), Real-time sync |
-| **Landing Experience** | Next.js 16 (App Router), React 19, Tailwind CSS v4, Framer Motion, GSAP, Three.js |
-| **Deployments** | Hugging Face Spaces (Backend Gradio SDK), Vercel (Frontend Landing) |
+| **Backend API** | Python 3.11 · FastAPI · Uvicorn · SQLite 3 (WAL Mode) |
+| **AI Diagnostic Core** | Google Gemma 4 26B (via OpenRouter) · Strict JSON Schema · Low Temperature (0.1) |
+| **Payment Integration** | Razorpay Python SDK · HMAC SHA-256 Webhook Verification · Payment Links API |
+| **Voice Engine** | gTTS (Google Text-to-Speech) · Hinglish Script Templates |
+| **Merchant War Room** | Bootstrap 5.3 Dark Glassmorphism · Google Fonts (*Outfit*, *Inter*, *JetBrains Mono*) · Real-time 5s auto-sync |
+| **Landing Experience** | Next.js 16 (App Router) · React 19 · Tailwind CSS v4 · Framer Motion · GSAP · Three.js |
+| **Backend Tunnel** | Cloudflare Tunnel (`cloudflared`) — exposes local FastAPI to the internet with zero config |
+| **Frontend Hosting** | Vercel (Free Tier) |
 
 ---
 
 ## 📂 Repository Structure
 
 ```text
-├── main.py                  # FastAPI Application, Webhooks & Simulation Endpoints
-├── db.py                    # SQLite WAL Database & Cryptographic Hash Chaining Ledger
+Pratyavartan/
+├── main.py                  # FastAPI App, Webhooks, Simulation Endpoints
+├── db.py                    # SQLite WAL Database & SHA-256 Hash-Chained Audit Ledger
 ├── ai_agent.py              # AI Diagnostic Classifier & Hinglish Voice Engine
 ├── orchestrator.py          # Autonomous Queue Engine & Stopping Rule Guardrails
-├── razorpay_service.py      # Razorpay SDK Wrapper, UPI Intents & Link Generation
-├── requirements.txt         # Core Backend Dependencies
+├── razorpay_service.py      # Razorpay SDK: Payment Links, UPI Intents, Instrument Routing
+├── check_ai.py              # AI Health Check & Diagnostic Verification Script
+├── check_audit.py           # Audit Trail Integrity Verification Script
+├── requirements.txt         # Python Dependencies
+├── .env.example             # Environment Variable Template (safe to commit)
 ├── templates/
-│   └── index.html           # Merchant War Room & Live Audit Dashboard UI
-├── revive-site/             # High-Performance Next.js 16 Landing Page
-├── hf-gradio/               # Hugging Face Spaces Deployment Package
-├── DEPLOY_HF.md             # HF Spaces Step-by-Step Deployment Guide
-└── DEPLOY_VERCEL.md         # Vercel Landing Deployment Guide
+│   └── index.html           # Merchant War Room & Live Audit Dashboard (Dark Glassmorphism)
+├── revive-site/             # Next.js 16 High-Performance 3D Animated Landing Page
+│   ├── src/
+│   │   ├── app/             # App Router Pages
+│   │   └── components/      # Hero, Features, Pricing, Footer Components
+│   └── package.json
+├── DEPLOY_VERCEL.md         # Vercel Landing Deployment Guide
+├── Dockerfile               # Optional containerized deployment
+├── docker-compose.yml       # Docker Compose for local container testing
+└── render.yaml              # Render.com Blueprint (alternative hosting)
 ```
 
 ---
 
 ## 💻 Local Setup & Development
 
-### 1. Prerequisites
-- Python 3.10+
-- Node.js 18+ (for frontend)
-- Razorpay Test Account (`Key ID` & `Key Secret`)
+### Prerequisites
+- **Python 3.10+**
+- **Node.js 18+** (for the landing page)
+- **Razorpay Test Account** ([dashboard.razorpay.com](https://dashboard.razorpay.com) → API Keys)
+- **OpenRouter API Key** ([openrouter.ai](https://openrouter.ai) — free tier available)
 
-### 2. Backend Setup
+### 1. Clone & Install Backend
 ```bash
-# Clone the repository
 git clone https://github.com/Nilesh1381/Pratyavartan.git
 cd Pratyavartan
 
-# Create and activate virtual environment
+# Create virtual environment
 python -m venv venv
 # Windows:
 .\venv\Scripts\activate
-# Linux/macOS:
+# macOS/Linux:
 source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+```
 
-# Configure Environment Variables (.env)
+### 2. Configure Environment
+```bash
 cp .env.example .env
+# Edit .env with your actual Razorpay & LLM credentials
 ```
 
-Fill in your `.env` credentials:
-```ini
-RAZORPAY_KEY_ID=rzp_test_...
-RAZORPAY_KEY_SECRET=...
-RAZORPAY_WEBHOOK_SECRET=...
-LLM_API_KEY=sk-or-v1-...
-LLM_BASE_URL=https://openrouter.ai/api/v1
-LLM_MODEL=minimax/minimax-01
-DEMO_VPA=revive@upi
-PORT=8010
-```
-
-Start the backend:
+### 3. Start the Backend
 ```bash
 python main.py
 ```
-- War Room Dashboard: `http://localhost:8010/dashboard`
-- OpenAPI Docs: `http://localhost:8010/docs`
+- 🎛️ **War Room Dashboard**: [http://localhost:8010/dashboard](http://localhost:8010/dashboard)
+- 📚 **API Documentation**: [http://localhost:8010/docs](http://localhost:8010/docs)
+- ❤️ **Health Check**: [http://localhost:8010/health](http://localhost:8010/health)
 
-### 3. Frontend Landing Setup
+### 4. Expose via Cloudflare Tunnel (for webhooks & external access)
+```bash
+# Download cloudflared: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+cloudflared tunnel --url http://localhost:8010
+```
+This gives you a public `https://xxxxx.trycloudflare.com` URL — use it for:
+- Razorpay webhook callbacks
+- Connecting the Vercel frontend to the backend
+- Live jury demos
+
+### 5. Start the Landing Page (Optional)
 ```bash
 cd revive-site
 npm install
 npm run dev
 ```
-Visit `http://localhost:3000` to interact with the 3D animated landing page.
+Visit [http://localhost:3000](http://localhost:3000) for the 3D animated landing experience.
 
 ---
 
-## 🧪 Interactive Jury Evaluation Cheat Sheet
+## 📡 API Endpoints
 
-The Merchant Command Center includes a built-in **Live Simulation Engine** so evaluators can test scenarios in real-time:
-
-| Scenario Button | Simulated Failure | System Response |
+| Method | Endpoint | Description |
 |---|---|---|
-| **Test UPI Limit** | `PAYMENT_UPI_LIMIT_EXCEEDED` | Switches instrument to Card/Netbanking, generates 1-click recovery link with zero discount. |
-| **Test Dropped Cart** | `CHECKOUT_INCOMPLETE` | Triggers Zero-UI UPI intent deep link with dynamic tiered discount. |
-| **Test Bank Down** | `GATEWAY_TIMEOUT` | Silently enters `MONITORING`, suppresses customer spam. |
-| **Test Max Retries** | Payment with `retry_count >= 2` | Halts AI evaluation, logs `STOPPING_RULE_TRIGGERED`, triggers `ESCALATE_HUMAN`. |
+| `GET` | `/health` | Health check with DB status |
+| `GET` | `/dashboard` | Merchant War Room & Audit Trail UI |
+| `GET` | `/docs` | Interactive Swagger/OpenAPI Documentation |
+| `POST` | `/simulate-failure` | Simulate payment failures for testing |
+| `GET` | `/trigger-agent` | Trigger autonomous recovery sweep |
+| `POST` | `/razorpay-webhook` | S2S webhook receiver (HMAC SHA-256 verified) |
+| `GET` | `/api/metrics` | Real-time revenue recovery KPI metrics |
+| `GET` | `/api/audit-log` | Full audit trail with hash chain integrity |
+| `GET` | `/api/payments` | List all tracked payment records |
 
 ---
 
-## 🔒 Compliance & Security Guardrails
+## 🧪 Hackathon Jury: Interactive Evaluation Guide
 
-- **PII Masking:** Customer phone numbers are masked on ingestion (`******1234`), never stored raw in plaintext.
-- **Cryptographic Webhooks:** All incoming webhooks must pass `X-Razorpay-Signature` HMAC SHA-256 validation.
-- **Audit Immutability:** SQLite WAL mode with SHA-256 parent block hash chaining prevents log tampering.
-- **No Harassment:** Strict limit of 2 retries per payment order.
+The Merchant Command Center includes a built-in **Live Simulation Engine** for real-time testing:
+
+| Scenario | Simulated Failure Code | Expected AI Response |
+|---|---|---|
+| **🔴 Test UPI Limit** | `PAYMENT_UPI_LIMIT_EXCEEDED` | `SWITCH_INSTRUMENT` → 1-click Card/EMI recovery link, **zero discount** |
+| **🟡 Test Dropped Cart** | `CHECKOUT_INCOMPLETE` | `SEND_UPI_INTENT` → Zero-UI UPI deep link with **tiered discount** |
+| **🟠 Test Bank Down** | `GATEWAY_TIMEOUT` | `WAIT_AND_MONITOR` → Silent hold, **no customer outreach** |
+| **🔵 Test Max Retries** | Payment with `retry_count >= 2` | `ESCALATE_HUMAN` → AI aborts, logs `STOPPING_RULE_TRIGGERED` |
+
+### How to Test:
+1. Open the **War Room Dashboard** → scroll to **Live Simulation Engine**.
+2. Click any scenario button → watch the audit trail update in real-time.
+3. Click **Trigger Recovery Sweep** → observe autonomous orchestration.
+4. Verify **KPI cards** update: Revenue at Risk, Revenue Recovered, Active Monitoring, Escalated.
 
 ---
 
-## 👥 Authors & Acknowledgments
+## 🔒 Compliance & Security
+
+| Guardrail | Implementation |
+|---|---|
+| **PII Data Masking** | Customer phone numbers masked on ingestion (`******1234`) — never stored in plaintext |
+| **Webhook Cryptography** | All Razorpay webhooks verified via `X-Razorpay-Signature` HMAC SHA-256 |
+| **Audit Immutability** | SHA-256 hash-chaining (`hash = SHA256(prev_hash + event)`) prevents log tampering |
+| **Anti-Harassment** | Hard stop at 2 retries per payment — no exceptions |
+| **CORS Protection** | Strict origin allowlisting via `ALLOWED_ORIGINS` environment variable |
+
+---
+
+## 🚢 Deployment Options
+
+| Platform | Type | Guide |
+|---|---|---|
+| **Cloudflare Tunnel** | Backend (primary) | `cloudflared tunnel --url http://localhost:8010` |
+| **Vercel** | Frontend Landing | [DEPLOY_VERCEL.md](DEPLOY_VERCEL.md) |
+| **Docker** | Full-stack containerized | `docker-compose up --build` |
+| **Render** | Cloud PaaS | Uses [render.yaml](render.yaml) blueprint |
+
+---
+
+## 👥 Team & Acknowledgments
 
 Built with ❤️ for the **Razorpay AI Buildathon 2026**.
 
-- **Team**: Nilesh & Contributors
+- **Nilesh** — Architecture, Backend Engine, AI Integration, Deployment
 - **Repository**: [github.com/Nilesh1381/Pratyavartan](https://github.com/Nilesh1381/Pratyavartan)
-- **Live Space**: [Hugging Face Space](https://huggingface.co/spaces/Nilesh67/Pratyavartan)
