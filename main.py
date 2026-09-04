@@ -96,7 +96,7 @@ class SimulateFailureRequest(BaseModel):
     """Request model for testing live failure recovery scenarios."""
     error_code: str = Field(..., description="Failure error code, e.g. upi_limit_exceeded, checkout_incomplete, gateway_timeout")
     error_description: str = Field(..., description="Descriptive error detail")
-    amount: int = Field(default=50000, description="Amount in paise (e.g., 50000 = ₹500, 500000 = ₹5,000)")
+    amount: int = Field(default=50000, description="Amount in paise (e.g., 50000 = Rs.500, 500000 = Rs.5,000)")
     user_contact: Optional[str] = Field(default="9876543210", description="Customer phone number (will be pseudonymized)")
 
 
@@ -410,7 +410,7 @@ async def simulate_webhook() -> Dict[str, Any]:
                 "entity": {
                     "id": sim_payment_id,
                     "entity": "payment",
-                    "amount": 350000,  # ₹3,500.00
+                    "amount": 350000,  # Rs.3,500.00
                     "currency": "INR",
                     "status": "failed",
                     "order_id": sim_order_id,

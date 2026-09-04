@@ -52,7 +52,7 @@ def process_single_payment_workflow(
 
     # Step B: Route Action according to AI Decision / Stopping Rules
     if action == "SEND_UPI_INTENT":
-        # Dynamic Discount & Voice Negotiation for high-intent abandoned carts (>= ₹5,000 / 5,00,000 paise)
+        # Dynamic Discount & Voice Negotiation for high-intent abandoned carts (>= Rs.5,000 / 5,00,000 paise)
         if amount >= 500000:
             try:
                 discount_info = ai_agent.generate_discount_offer(

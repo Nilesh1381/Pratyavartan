@@ -54,6 +54,7 @@ implementation_plan.md
 
 # Hugging Face Spaces standalone bundle
 hf-space/
+hf-gradio/
 
 # Cloudflared Tunnel Binary
 cloudflared.exe

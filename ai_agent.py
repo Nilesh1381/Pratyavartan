@@ -289,9 +289,9 @@ def generate_discount_offer(
     PART B: AI Dynamic Discount Engine.
 
     Evaluates transaction value and applies tiered dynamic incentives to salvage high-intent carts:
-    - >= 25,00,000 paise (>= ₹25,000) -> 5% discount
-    - >= 10,00,000 paise (>= ₹10,000) -> 3% discount
-    - >= 5,00,000 paise (>= ₹5,000)  -> 2% discount
+    - >= 25,00,000 paise (>= Rs.25,000) -> 5% discount
+    - >= 10,00,000 paise (>= Rs.10,000) -> 3% discount
+    - >= 5,00,000 paise (>= Rs.5,000)  -> 2% discount
     - else                            -> 0% discount
     """
     cid = correlation_id or str(uuid.uuid4())
@@ -324,7 +324,7 @@ def generate_discount_offer(
             payment_id=pid,
             event_type="DISCOUNT_APPROVED",
             payload=offer,
-            reasoning=f"AI Dynamic Discount Engine authorized {discount_pct}% instant retention incentive (Saved ₹{discount_amount_paise/100:.2f}).",
+            reasoning=f"AI Dynamic Discount Engine authorized {discount_pct}% instant retention incentive (Saved Rs.{discount_amount_paise/100:.2f}).",
             severity="INFO",
         )
 
@@ -373,7 +373,7 @@ def generate_voice_script(
     else:
         fallback_script = (
             f"Namaste {customer_name}! Aapka payment complete nahi ho paya tha. "
-            f"Aapke liye special discount apply karke final amount sirf ₹{final_inr:,.2f} hai. "
+            f"Aapke liye special discount apply karke final amount sirf rupees {final_inr:,.2f} hai. "
             f"Kripya diye gaye link se turant complete karein!"
         )
 
@@ -390,7 +390,7 @@ def generate_voice_script(
                 )
                 user_msg = (
                     f"Customer Name: {customer_name}\n"
-                    f"Original Amount: ₹{original_inr:,.2f}\n"
+                    f"Original Amount: Rs.{original_inr:,.2f}\n"
                     f"Failure Reason: UPI Limit Exceeded\n"
                     f"Alternative Method: Card / EMI One-Click Link (No cart rebuild required)"
                 )
@@ -405,7 +405,7 @@ def generate_voice_script(
                 )
                 user_msg = (
                     f"Customer Name: {customer_name}\n"
-                    f"Original Amount: ₹{original_inr:,.2f}\n"
+                    f"Original Amount: Rs.{original_inr:,.2f}\n"
                     f"Failure Reason: Insufficient Account Balance (top-up possible)\n"
                     f"Primary Method: 1-Click UPI Intent Link (UPI stays enabled)\n"
                     f"Backup Methods: Card / EMI / Netbanking"
@@ -414,9 +414,9 @@ def generate_voice_script(
             else:
                 user_msg = (
                     f"Customer Name: {customer_name}\n"
-                    f"Original Amount: ₹{original_inr:,.2f}\n"
-                    f"Discount Saved: ₹{discount_inr:,.2f}\n"
-                    f"Final Discounted Amount: ₹{final_inr:,.2f}"
+                    f"Original Amount: Rs.{original_inr:,.2f}\n"
+                    f"Discount Saved: Rs.{discount_inr:,.2f}\n"
+                    f"Final Discounted Amount: Rs.{final_inr:,.2f}"
                 )
                 system_p = VOICE_PROMPT.strip()
 
