@@ -79,9 +79,13 @@ _allowed_origins = [
     for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",")
     if origin.strip()
 ]
+# Default to localhost only if ALLOWED_ORIGINS not set; empty string -> strict empty origin list
+if os.getenv("ALLOWED_ORIGINS") is None:
+    _allowed_origins = ["http://localhost:8000", "http://127.0.0.1:8000"]
+allow_origins = _allowed_origins if _allowed_origins else ["http://localhost:8000", "http://127.0.0.1:8000"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins or ["*"],
+    allow_origins=allow_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
